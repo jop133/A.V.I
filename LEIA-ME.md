@@ -1,10 +1,25 @@
-# Jarvis local — protótipo 100% offline
-
-Nenhuma peça sai da sua máquina. Sem API, sem cota, sem custo.
+# Jarvis local — protótipo
 
 ```
-você fala → VAD → Whisper → contexto de tela → qwen3 → Piper → voz
+você fala → VAD → Whisper → contexto de tela → qwen3 → voz
 ```
+
+**O cérebro é 100% local.** Whisper, qwen3 e a leitura de tela não saem da
+máquina, não têm cota e não custam nada. Isso é o núcleo do projeto e não
+depende de rede nenhuma.
+
+**A boca e a pesquisa, não.** Três coisas saem daqui, e vale saber quais:
+
+| Peça | Para onde vai | Quando |
+|---|---|---|
+| Voz (Cartesia) | `api.cartesia.ai`, com chave | motor padrão hoje |
+| Voz (Edge) | Microsoft, sem chave | reserva da Cartesia |
+| `[CONSULTAR:]` | endpoints de terceiros via `g4f` | perguntas que o qwen3 delega |
+
+O terceiro merece atenção: `consultar_gemini_web()` manda junto o **texto da
+janela em foco**. Se for seu email ou seu gerenciador de senhas, vai junto.
+Trocando `MOTOR_VOZ` para `"piper"` e não usando o `[CONSULTAR:]`, o ciclo
+volta a ser inteiramente offline.
 
 ## Como rodar
 
@@ -26,38 +41,75 @@ Só a leitura de tela, isolada:
 
 ## Latência medida (28/ago/2026)
 
-Do instante em que você **para de falar** até ouvir a primeira palavra dele:
+Do instante em que você **para de falar** até ouvir a primeira palavra dele,
+com o Piper, medido em 3 turnos locais seguidos:
 
 | Etapa | Tempo |
 |---|---|
-| VAD + Whisper (transcrição sobreposta) | 1,95s |
+| Espera do VAD (deliberada) | 0,70s |
+| Whisper | **0,00s** — roda dentro da espera acima |
 | Contexto de tela (UI Automation) | 0,10s |
-| qwen3:8b até o 1º token | 0,78–1,03s |
-| 1ª frase pronta + Piper | 0,27–0,66s |
-| **Total** | **3,43s** (3,08–3,62s) |
+| qwen3:8b até o 1º token | 1,37–1,64s |
+| 1ª frase pronta + Piper | 0,07–0,18s |
+| **Total** | **3,05s** (2,92–3,10s) |
 
-Antes das otimizações: **4,69s de média, variando de 3,4s a 6,6s**. O ganho
-maior nem foi a média — foi a **consistência**: a variação caiu de 3,2s para
-0,5s, porque a voz não espera mais a resposta inteira ficar pronta.
+O ganho maior não é a média — é a **consistência**: a variação ficou em
+**0,18s**. A voz não espera mais a resposta inteira, e o Whisper não aparece
+na conta porque acontece durante um silêncio que já ia existir de qualquer
+jeito.
 
 Referência: o Gemini na nuvem entregou 0,75s — mas com picos de 47s e cota.
+
+> **Aviso de honestidade.** Uma versão anterior deste arquivo anunciava 3,43s
+> e descrevia as três otimizações abaixo como "estão no código". Elas não
+> estavam — em lugar nenhum, nem nos backups. Foram reimplementadas em
+> 28/ago/2026 e os números acima foram medidos de novo, com o código atual.
+> Se você mexer no ciclo, meça de novo antes de editar esta tabela.
 
 ## Três otimizações que estão no código
 
 **1. Transcrição sobreposta ao silêncio do VAD.**
-O VAD espera 0,8s de silêncio antes de fechar o turno. Esse tempo era ocioso.
+O VAD espera 0,7s de silêncio antes de fechar o turno. Esse tempo era ocioso.
 Agora a transcrição dispara assim que sua voz cai e roda *durante* a espera.
-Sem perda de precisão: o Whisper recebe o áudio inteiro, só começa antes.
+Sem perda de precisão: o que vem depois do disparo é silêncio, então o trecho
+enviado ao Whisper já contém a fala inteira.
+
+Medido com microfone simulado (2,60s de fala + 1,40s de silêncio):
+**5,67s → 4,13s até ter o texto em mãos, 1,53s a menos.**
+
+Dois detalhes que o teste cobriu: o disparo espera 0,25s antes de começar,
+porque o RMS é média do bloco e cai um pouco *antes* de a palavra terminar —
+sem essa margem o rabo da última palavra some. E se você só pausou e volta a
+falar, o resultado adiantado é descartado.
 
 **2. `/api/chat` com histórico limpo, em vez de `/api/generate` com `context`.**
 Passando `context`, o Ollama reprocessava a conversa inteira a cada turno —
 medido: 0,78s no turno 1, **2,16s no turno 5, crescendo sem parar**. Com
-`messages` e o bloco de tela apenas na pergunta atual, estabiliza em ~1s.
+`messages` e o bloco de tela apenas na pergunta atual:
+
+**turno 1 = 0,50s → turno 6 = 0,84s, e estabiliza** (o histórico é cortado
+nas últimas 3 trocas).
 
 **3. A voz emenda no modelo, frase a frase.**
 Antes esperávamos a resposta completa para sintetizar. Numa resposta longa isso
 custava **2,37s parados**. Agora a primeira frase já vai sendo falada enquanto o
 modelo escreve o resto.
+
+Medido com o Piper, que é o motor **mais rápido** (0,10s/frase):
+**1º áudio em 0,60s → 0,09s, 83% menos.** Com Edge ou Cartesia, onde cada
+frase custa uma viagem de rede, o ganho é bem maior.
+
+No ciclo completo isso fica visível no relatório de etapas: a marca
+`Voz (1o audio)` passa a aparecer **antes** de `qwen3 (resposta completa)`.
+
+`VOZ_STREAMING = False` no topo do `jarvis.py` volta ao comportamento antigo.
+
+**Uma armadilha que essa otimização criou.** Falar antes de a resposta acabar
+significa falar antes de saber se ela era uma tag. O `SeparadorDeFalas`
+segura o começo até ter certeza: se vier `[CONSULTAR:`, nada é falado — quem
+responde é o caminho web. Sem essa trava o Jarvis leria a própria tag em voz
+alta. Vale para `[COR:]`, `[BRILHO:]` e para vazamentos do bloco de tela, onde
+o descarte é da **linha inteira**, não só da tag.
 
 ## Duas armadilhas de PROMPT que quebraram o comportamento
 
@@ -94,7 +146,11 @@ num_ctx=8192 ->     90ms   (bate, já carregado)
 **2. `think: false` no qwen3.** Com o modo pensante ligado o tempo até o
 primeiro token vai de 0,43s para 3,14s, e respostas curtas voltam vazias.
 
-**3. `OLLAMA_KEEP_ALIVE=-1`** (já configurado) para o modelo não sair da VRAM.
+**3. `keep_alive` vale por requisição, não por sessão.**
+`OLLAMA_KEEP_ALIVE=-1` no ambiente ajuda, mas o pré-aquecimento mandava
+`keep_alive: -1` e as chamadas seguintes não mandavam nada — então voltavam ao
+padrão de 5 minutos e o modelo saía da VRAM em conversa espaçada. Agora **toda**
+requisição manda `keep_alive: -1`.
 
 **4. A árvore de acessibilidade do Chromium precisa ser "acordada".**
 Apps Electron (VS Code, Discord, navegadores) devolvem uma árvore pobre na
@@ -103,17 +159,25 @@ chamado uma vez no boot.
 
 ## Onde ainda dá para ganhar
 
-O VAD + Whisper são **1,95s dos 3,43s** — mais da metade. Desses, 0,8s é a
-espera deliberada do VAD (baixar isso corta quem fala pausado) e ~1,15s é o
-que sobra da transcrição.
+Com o Whisper escondido dentro da espera do VAD, o gargalo mudou de lugar: o
+**qwen3 até o 1º token agora é 1,37–1,64s dos 3,05s** — metade do total. O
+resto se divide entre a espera do VAD (0,70s, deliberada) e migalhas.
 
-1. **Transcrição incremental de verdade** — hoje a sobreposição só aproveita os
-   0,8s do VAD. Transcrever em pedaços *durante* a fala aproveitaria também o
-   tempo em que você está falando. Custo: o Whisper erra mais nas emendas.
-2. **Whisper `base` em vez de `small`** — 0,62s contra 1,64s, mas o acerto cai
-   de 84% para 71%. Provavelmente não compensa.
-3. **Respostas mais curtas** — o qwen3 é verboso apesar do prompt pedir brevidade.
+1. **O 1º token do qwen3** — é o alvo agora. O prompt de sistema cresceu
+   muito (personalidade + tags de cor + brilho + roteamento web), e tudo isso
+   é lido antes do primeiro token sair. Encolher o prompt encolhe esse tempo.
+2. **Transcrição incremental de verdade** — a sobreposição já aproveita os
+   0,70s do VAD, mas transcrever em pedaços *durante* a fala aproveitaria
+   também o tempo em que você está falando. Custo: o Whisper erra mais nas
+   emendas. Ganho menor agora do que era antes, já que o Whisper saiu da conta.
+3. **Whisper `base` em vez de `small`** — 0,62s contra 1,64s, mas o acerto cai
+   de 84% para 71%. Depois da sobreposição isso deixou de compensar: o tempo
+   que economizaria já está escondido na espera do VAD.
+4. **Respostas mais curtas** — o qwen3 é verboso apesar do prompt pedir brevidade.
    Isso não muda o tempo até a primeira palavra, mas muda o tempo até ele calar.
+5. **A regra do `[CONSULTAR:]` dispara cedo demais** — medido: ele delega para
+   a web até "capital da França", que responde sozinho em 0,5s. Cada delegação
+   indevida custa segundos e manda o texto da sua tela para terceiros.
 
 ## Trocando a voz
 
@@ -255,6 +319,42 @@ preparada. Sem isso, cada frase pagava ~1,3s de rede em silêncio — medido,
 **Primeira fala cortada curta.** O custo do Edge cresce com o tamanho do texto:
 uma primeira frase de ~100 caracteres custou 3,90s contra 1,18s de uma curta.
 Agora ela é quebrada numa vírgula se passar de 70 caracteres.
+
+## A HUD exige um token
+
+O `hud_bridge` sobe um servidor SSE em `127.0.0.1:8765` para falar com a
+interface. Escutar em localhost **não** é proteção: qualquer site aberto no
+seu navegador consegue abrir um `EventSource` para lá. Enquanto a ponte
+respondia com `Access-Control-Allow-Origin: *`, uma página qualquer podia ler
+em tempo real tudo que você fala e todas as janelas que você usa.
+
+Restringir a origem não resolveria — uma página consegue origem `null` por
+iframe sandbox. O que resolve é um segredo que ela não tem como adivinhar:
+
+- a cada boot, o `hud_bridge` sorteia um token e grava em `.hud_token`
+  (no `.gitignore`, junto do `.env`);
+- `/events` exige `?token=` e devolve **403 sem nenhum header de CORS** para
+  quem não tiver;
+- a HUD do navegador recebe o token pela URL; as interfaces Tk leem o arquivo.
+
+**Consequência prática:** abrir `abrir_orbe.bat` ou `abrir_bordas.bat` com o
+Jarvis desligado agora mostra a interface desconectada, porque não existe
+`.hud_token`. É o comportamento correto — sem o Jarvis rodando não há nada
+para receber.
+
+## O cache de voz guarda a taxa no nome
+
+Os `.pcm` em `vozes/cache/` seguem o formato `{hash}.{taxa}.pcm`. A taxa
+precisa viajar junto porque os motores não concordam: o Piper gera a
+**22.050 Hz** e Cartesia e Edge a **24.000 Hz**.
+
+Antes o arquivo era só `{hash}.pcm` e a leitura assumia 24.000 sempre —
+então toda fala do Piper vinda do cache tocava **8,8% acelerada e mais
+aguda**, justamente no motor que atende quando a internet cai.
+
+Arquivos do formato antigo continuam valendo para Cartesia e Edge. Para o
+Piper eles são ignorados: ressintetizar custa 0,10s e nenhum crédito, então
+não vale o risco de tocar um arquivo de taxa desconhecida.
 
 ## Por que não há modelo de visão aqui
 
