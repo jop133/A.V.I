@@ -8,6 +8,7 @@
 
 import json
 import re
+import time
 import urllib.parse
 import urllib.request
 
@@ -41,51 +42,126 @@ NOMES_MOEDAS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Rede: uma falha passageira não pode derrubar a função inteira
+# ---------------------------------------------------------------------------
+#
+# Medido em 28/ago/2026: `api.open-meteo.com` ficou inalcançável desta máquina
+# por vários minutos — o handshake TLS estourava até com 15s de timeout — e
+# voltou sozinha depois. Com timeout curto e nenhuma retentativa, isso deixava
+# a previsão do tempo simplesmente morta durante todo o episódio.
+
+TEMPO_LIMITE = 3.0        # segundos por tentativa
+TENTATIVAS = 2            # a primeira mais uma repescagem
+ESPERA_ENTRE = 0.3        # segundos antes de tentar de novo
+ORCAMENTO = 6.0           # teto do que o usuario espera ouvindo silencio
+TTL_CACHE = 600           # 10 min: por quanto tempo um dado velho ainda serve
+
+_ULTIMO_BOM = {}          # chave -> (instante, texto)
+
+
+def _pedir_json(url, prazo=None, tentativas=TENTATIVAS):
+    """GET de JSON com uma retentativa, dentro de um PRAZO comum.
+
+    O prazo existe porque a resiliencia sozinha e uma armadilha: subindo o
+    timeout e somando retentativas, o pior caso medido virou 18s numa cotacao.
+    Num assistente de voz isso e inaceitavel -- e melhor dizer o dado de tres
+    minutos atras do que deixar o usuario esperando em silencio.
+
+    `prazo` e um instante de time.monotonic() compartilhado por TODAS as
+    chamadas de uma mesma pergunta: obter_clima faz duas (geocoding e
+    previsao) e as duas cabem dentro do mesmo teto.
+    """
+    ultimo_erro = None
+    for n in range(tentativas):
+        restante = TEMPO_LIMITE if prazo is None else prazo - time.monotonic()
+        if restante <= 0.3:
+            ultimo_erro = "prazo esgotado"
+            break
+        try:
+            req = urllib.request.Request(
+                url, headers={"User-Agent": "Jarvis-Local/1.0"})
+            with urllib.request.urlopen(req, timeout=min(TEMPO_LIMITE, restante)) as resp:
+                return json.loads(resp.read().decode())
+        except Exception as e:
+            ultimo_erro = e
+            if n + 1 < tentativas:
+                time.sleep(ESPERA_ENTRE)
+    print(f"[REDE] {url.split('?')[0]} falhou: {ultimo_erro}")
+    return None
+
+
+def _guardar(chave, texto):
+    """Registra a última leitura boa e devolve o texto sem alterá-lo."""
+    if texto:
+        _ULTIMO_BOM[chave] = (time.time(), texto)
+    return texto
+
+
+def _resgatar(chave):
+    """Última leitura boa, se ainda recente, com a idade dita em voz alta.
+
+    Um dado de seis minutos atrás, apresentado como tal, é mais útil que
+    "não consegui" — e honesto, porque a idade vai junto na frase.
+    """
+    item = _ULTIMO_BOM.get(chave)
+    if not item:
+        return None
+    idade = time.time() - item[0]
+    if idade > TTL_CACHE:
+        return None
+    minutos = int(idade // 60)
+    if minutos < 1:
+        quando = "de instantes atrás"
+    elif minutos == 1:
+        quando = "de um minuto atrás"
+    else:
+        quando = f"de {minutos} minutos atrás"
+    return f"A rede falhou agora, senhor. Pela leitura {quando}: {item[1]}"
+
+
 def obter_cotacao(par_moeda="USD-BRL"):
     """Consulta a cotação exata em tempo real na AwesomeAPI."""
-    try:
-        url = f"https://economia.awesomeapi.com.br/last/{par_moeda}"
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "Jarvis-Local/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=4) as response:
-            data = json.loads(response.read().decode())
+    prazo = time.monotonic() + ORCAMENTO
+    data = _pedir_json(f"https://economia.awesomeapi.com.br/last/{par_moeda}", prazo)
+    if data:
+        try:
+            chave = par_moeda.replace("-", "")
+            if chave in data:
+                item = data[chave]
+                valor = float(item.get("bid", 0))
+                variacao = float(item.get("pctChange", 0))
+                maxima = float(item.get("high", 0))
+                minima = float(item.get("low", 0))
+                nome = NOMES_MOEDAS.get(par_moeda, par_moeda)
 
-        chave = par_moeda.replace("-", "")
-        if chave in data:
-            item = data[chave]
-            valor = float(item.get("bid", 0))
-            variacao = float(item.get("pctChange", 0))
-            maxima = float(item.get("high", 0))
-            minima = float(item.get("low", 0))
-            nome = NOMES_MOEDAS.get(par_moeda, par_moeda)
+                # Formatação especial para Cripto vs Moeda Fiduciária
+                if "BTC" in par_moeda:
+                    valor_fmt = f"R$ {valor:,.0f}".replace(",", ".")
+                    max_fmt = f"R$ {maxima:,.0f}".replace(",", ".")
+                    min_fmt = f"R$ {minima:,.0f}".replace(",", ".")
+                elif "ETH" in par_moeda:
+                    valor_fmt = f"R$ {valor:,.2f}".replace(".", ",")
+                    max_fmt = f"R$ {maxima:,.2f}".replace(".", ",")
+                    min_fmt = f"R$ {minima:,.2f}".replace(".", ",")
+                else:
+                    valor_fmt = f"R$ {valor:.2f}".replace(".", ",")
+                    max_fmt = f"R$ {maxima:.2f}".replace(".", ",")
+                    min_fmt = f"R$ {minima:.2f}".replace(".", ",")
 
-            # Formatação especial para Cripto vs Moeda Fiduciária
-            if "BTC" in par_moeda:
-                valor_fmt = f"R$ {valor:,.0f}".replace(",", ".")
-                max_fmt = f"R$ {maxima:,.0f}".replace(",", ".")
-                min_fmt = f"R$ {minima:,.0f}".replace(",", ".")
-            elif "ETH" in par_moeda:
-                valor_fmt = f"R$ {valor:,.2f}".replace(".", ",")
-                max_fmt = f"R$ {maxima:,.2f}".replace(".", ",")
-                min_fmt = f"R$ {minima:,.2f}".replace(".", ",")
-            else:
-                valor_fmt = f"R$ {valor:.2f}".replace(".", ",")
-                max_fmt = f"R$ {maxima:.2f}".replace(".", ",")
-                min_fmt = f"R$ {minima:.2f}".replace(".", ",")
+                tendencia = (
+                    f"alta de {abs(variacao):.2f}%"
+                    if variacao >= 0
+                    else f"queda de {abs(variacao):.2f}%"
+                )
+                return _guardar("cotacao:" + par_moeda, (
+                    f"O {nome} está cotado a {valor_fmt} no momento, operando em {tendencia} hoje. "
+                    f"A máxima do dia foi de {max_fmt} e a mínima de {min_fmt}."
+                ))
+        except Exception as e:
+            print(f"[ERRO COTAÇÃO]: {e}")
 
-            tendencia = (
-                f"alta de {abs(variacao):.2f}%"
-                if variacao >= 0
-                else f"queda de {abs(variacao):.2f}%"
-            )
-            return (
-                f"O {nome} está cotado a {valor_fmt} no momento, operando em {tendencia} hoje. "
-                f"A máxima do dia foi de {max_fmt} e a mínima de {min_fmt}."
-            )
-    except Exception as e:
-        print(f"[ERRO COTAÇÃO]: {e}")
-    return None
+    return _resgatar("cotacao:" + par_moeda)
 
 
 def detectar_cotacao(texto):
@@ -148,73 +224,46 @@ WMO_WEATHER_CODES = {
 }
 
 
-def obter_cidade_ip():
+def obter_cidade_ip(prazo=None):
     """Detecta a cidade atual do usuário via geolocalização por IP (gratuita)."""
-    try:
-        req = urllib.request.Request(
-            "http://ip-api.com/json/?fields=status,city,regionName,lat,lon",
-            headers={"User-Agent": "Jarvis-Local/1.0"},
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read().decode())
-            if data.get("status") == "success":
-                return (
-                    data.get("city", "São Paulo"),
-                    data.get("lat"),
-                    data.get("lon"),
-                )
-    except Exception:
-        pass
+    data = _pedir_json("http://ip-api.com/json/?fields=status,city,regionName,lat,lon", prazo)
+    if data and data.get("status") == "success":
+        return (data.get("city", "São Paulo"), data.get("lat"), data.get("lon"))
     return ("São Paulo", -23.5505, -46.6333)
 
 
-def geocodificar_cidade(nome_cidade):
+def geocodificar_cidade(nome_cidade, prazo=None):
     """Busca latitude e longitude de qualquer cidade do mundo pelo nome."""
-    try:
-        cidade_enc = urllib.parse.quote(nome_cidade)
-        url = f"https://geocoding-api.open-meteo.com/v1/search?name={cidade_enc}&count=1&language=pt&format=json"
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "Jarvis-Local/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=3) as resp:
-            data = json.loads(resp.read().decode())
-            if data.get("results") and len(data["results"]) > 0:
-                primeiro = data["results"][0]
-                return (
-                    primeiro.get("name", nome_cidade),
-                    primeiro.get("latitude"),
-                    primeiro.get("longitude"),
-                )
-    except Exception as e:
-        print(f"[ERRO GEOCODING]: {e}")
+    cidade_enc = urllib.parse.quote(nome_cidade)
+    data = _pedir_json(
+        f"https://geocoding-api.open-meteo.com/v1/search"
+        f"?name={cidade_enc}&count=1&language=pt&format=json", prazo)
+    if data and data.get("results"):
+        primeiro = data["results"][0]
+        return (primeiro.get("name", nome_cidade),
+                primeiro.get("latitude"), primeiro.get("longitude"))
     return None
 
 
 def obter_clima(cidade_solicitada=None):
     """Obtém dados meteorológicos ao vivo do Open-Meteo."""
-    try:
-        if cidade_solicitada:
-            geo = geocodificar_cidade(cidade_solicitada)
-            if geo:
-                cidade, lat, lon = geo
-            else:
-                cidade, lat, lon = obter_cidade_ip()
-        else:
-            cidade, lat, lon = obter_cidade_ip()
+    chave = "clima:" + (cidade_solicitada or "").lower().strip()
+    prazo = time.monotonic() + ORCAMENTO
 
-        url = (
-            f"https://api.open-meteo.com/v1/forecast?"
-            f"latitude={lat}&longitude={lon}&current="
-            f"temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,rain,weather_code,wind_speed_10m"
-            f"&timezone=auto"
-        )
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "Jarvis-Local/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=4) as resp:
-            data = json.loads(resp.read().decode())
+    if cidade_solicitada:
+        geo = geocodificar_cidade(cidade_solicitada, prazo)
+        cidade, lat, lon = geo if geo else obter_cidade_ip(prazo)
+    else:
+        cidade, lat, lon = obter_cidade_ip(prazo)
 
-        if "current" in data:
+    data = _pedir_json(
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat}&longitude={lon}&current="
+        f"temperature_2m,relative_humidity_2m,apparent_temperature,precipitation,"
+        f"rain,weather_code,wind_speed_10m&timezone=auto", prazo)
+
+    if data and "current" in data:
+        try:
             cur = data["current"]
             temp = round(cur.get("temperature_2m", 0))
             sensacao = round(cur.get("apparent_temperature", temp))
@@ -223,20 +272,17 @@ def obter_clima(cidade_solicitada=None):
             vento = round(cur.get("wind_speed_10m", 0))
             code = cur.get("weather_code", 0)
             condicao = WMO_WEATHER_CODES.get(code, "céu parcialmente nublado")
+            chuva_str = ("Há chuva no momento" if precipitacao > 0 else "sem chuva agora")
 
-            chuva_str = (
-                "Há chuva no momento"
-                if precipitacao > 0
-                else "sem chuva agora"
-            )
+            return _guardar(chave, (
+                f"Em {cidade}, a temperatura atual é de {temp}°C com sensação térmica "
+                f"de {sensacao}°C e {condicao}. A umidade do ar está em {umidade}% "
+                f"com ventos a {vento} km/h, {chuva_str}."
+            ))
+        except Exception as e:
+            print(f"[ERRO CLIMA]: {e}")
 
-            return (
-                f"Em {cidade}, a temperatura atual é de {temp}°C com sensação térmica de {sensacao}°C e {condicao}. "
-                f"A umidade do ar está em {umidade}% com ventos a {vento} km/h, {chuva_str}."
-            )
-    except Exception as e:
-        print(f"[ERRO CLIMA]: {e}")
-    return None
+    return _resgatar(chave)
 
 
 def detectar_clima(texto):

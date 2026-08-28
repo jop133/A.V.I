@@ -23,3 +23,6 @@ vozes/cache/
 
 # Copias de trabalho -- o historico do git substitui isso
 *.orig
+
+# Log de falhas ao abrir as interfaces (diagnostico local)
+.interface_erros.log

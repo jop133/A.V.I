@@ -113,9 +113,21 @@ def main():
             "--disable-default-apps"
         ]
         try:
+            inicio = time.time()
             p = subprocess.Popen(cmd)
-            p.wait()
-        except Exception:
+            rc = p.wait()
+            # Saida imediata com codigo 0 nao e sucesso: e o Chromium tendo
+            # ENTREGADO a janela para outra instancia que ja detinha este
+            # perfil. Quando isso acontece a janela nao e nossa, nao da para
+            # fecha-la matando este processo, e a proxima troca de interface
+            # falha em silencio. O hud_bridge limpa o perfil antes de chamar
+            # aqui; se a mensagem abaixo aparecer, a limpeza nao pegou.
+            if rc == 0 and (time.time() - inicio) < 3.0:
+                print("[HUD] O Edge saiu em %.1fs com codigo 0: entregou a janela "
+                      "para outra instancia no mesmo perfil (%s)."
+                      % (time.time() - inicio, PROFILE_DIR), file=sys.stderr)
+        except Exception as e:
+            print("[HUD] Falha ao abrir o Edge: %r" % (e,), file=sys.stderr)
             os.system(f'start "" /max msedge --app="{url}" --start-maximized')
     else:
         os.system(f'start "" /max msedge --app="{url}" --start-maximized')

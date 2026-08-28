@@ -22,6 +22,8 @@ FILA_EVENTOS = queue.Queue()
 CLIENTES = set()
 LOCK = threading.Lock()
 PORTA_HUD = 8765
+PERFIL_HUD = BASE / ".hud_profile"      # o mesmo que hud_app.py usa no Edge
+LOG_INTERFACE = BASE / ".interface_erros.log"
 
 # O servidor escuta em 127.0.0.1, o que da uma falsa sensacao de seguranca:
 # QUALQUER site aberto no navegador consegue abrir um EventSource para
@@ -214,6 +216,42 @@ def fechar_interfaces_anteriores():
         pass
 
 
+def _matar_edge_do_perfil():
+    """Mata SOMENTE os Edge que estao usando o perfil da HUD.
+
+    O Edge normal do usuario nao e tocado: o filtro e o --user-data-dir na
+    linha de comando do processo.
+
+    Existe por causa de um comportamento do Chromium que quebrava o modo
+    completo em silencio: lancado num perfil que outra instancia ja detem, o
+    Edge ENTREGA a janela para ela e sai com codigo 0. O hud_app.py, que faz
+    p.wait(), morre junto -- e PROCESSO_INTERFACE_ATUAL passa a apontar para
+    um processo morto. O taskkill seguinte nao alcanca o Edge de verdade,
+    sobra um fantasma segurando o perfil, e toda troca para o modo completo
+    passa a falhar sem dizer nada. Medido: 2o lancamento devolve rc=0.
+    """
+    alvo = str(PERFIL_HUD).replace("'", "''")
+    comando = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+               "Where-Object { $_.CommandLine -like '*" + alvo + "*' } | "
+               "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+               "-ErrorAction SilentlyContinue }")
+    try:
+        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", comando],
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+    except Exception as e:
+        print(f"  [Interface] nao consegui limpar o Edge do perfil: {e}")
+
+
+def _ultimas_linhas_do_log(n=6):
+    try:
+        linhas = LOG_INTERFACE.read_text(encoding="utf-8", errors="replace").splitlines()
+        for l in linhas[-n:]:
+            if l.strip():
+                print("      | " + l[:150])
+    except Exception:
+        pass
+
+
 def _executar_alternancia(modo):
     global PROCESSO_INTERFACE_ATUAL
     with LOCK_PROC:
@@ -244,15 +282,38 @@ def _executar_alternancia(modo):
             script = BASE / "hud_app.py"
 
         if script and script.is_file():
+            # O modo completo abre o Edge; qualquer instancia fantasma no
+            # mesmo perfil faria o novo lancamento ser engolido.
+            if script.name == "hud_app.py":
+                _matar_edge_do_perfil()
+
             try:
+                # stderr vai para arquivo, NAO para DEVNULL: quando uma
+                # interface morre ao abrir, e a unica pista que sobra.
+                log = open(LOG_INTERFACE, "a", encoding="utf-8")
+                log.write("\n--- %s | abrindo %s (modo %s) ---\n"
+                          % (time.strftime("%H:%M:%S"), script.name, modo))
+                log.flush()
                 PROCESSO_INTERFACE_ATUAL = subprocess.Popen(
                     [python_exe, str(script)],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stderr=log
                 )
                 print(f"  [Interface] Modo ativado: {modo.upper()} ({script.name})")
             except Exception as e:
                 print(f"  [Interface] Erro ao alternar para {modo}: {e}")
+                return
+
+            # Confere se a interface sobreviveu. Antes, um processo que morria
+            # ao nascer passava por sucesso e o Jarvis dizia "ativado" para
+            # uma janela que nunca abriu.
+            time.sleep(1.5)
+            if PROCESSO_INTERFACE_ATUAL.poll() is not None:
+                print(f"  [Interface] AVISO: {script.name} encerrou logo apos abrir "
+                      f"(codigo {PROCESSO_INTERFACE_ATUAL.returncode}). "
+                      f"A janela provavelmente NAO abriu. Ultimas linhas de "
+                      f"{LOG_INTERFACE.name}:")
+                _ultimas_linhas_do_log()
 
 
 def alternar_interface(modo="completo"):
