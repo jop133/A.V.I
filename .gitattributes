@@ -1,0 +1,28 @@
+# Terminadores de linha deterministicos, independentes do core.autocrlf de
+# cada maquina. Sem isto, o git converte tudo para CRLF no checkout e aparece
+# diff em arquivo que ninguem editou.
+
+# Padrao: LF no repositorio, nativo no working tree.
+* text=auto
+
+# O cmd.exe pode engasgar com LF em rotulos e goto -- .bat sempre CRLF.
+*.bat text eol=crlf
+
+# Codigo e config: LF nos dois lados, para casar com o que ja esta no disco.
+*.py    text eol=lf
+*.js    text eol=lf
+*.css   text eol=lf
+*.html  text eol=lf
+*.md    text eol=lf
+*.json  text eol=lf
+.env*   text eol=lf
+.gitignore       text eol=lf
+.gitattributes   text eol=lf
+*.code-workspace text eol=lf
+
+# Binarios: nunca converter (hoje ignorados, mas a regra fica valendo).
+*.onnx binary
+*.pcm  binary
+*.wav  binary
+*.mp3  binary
+*.bin  binary
