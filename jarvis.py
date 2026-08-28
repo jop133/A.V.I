@@ -88,6 +88,7 @@ BLOCO = 1024
 BYTES_POR_AMOSTRA = 2     # PCM 16 bits mono -- 1 amostra = 2 bytes
 VAD_LIMIAR = 180.0        # RMS ideal e sensível para captação natural de voz
 VAD_SILENCIO = 0.7        # segundos de silêncio para fechar o turno de fala
+VAD_ATRASO_TRANSCRICAO = 0.25  # espera antes de disparar a transcricao adiantada
 SISTEMA = """Voce e o Jarvis, assistente pessoal do Joao Pedro, rodando LOCALMENTE no PC dele.
 
 Regras:
@@ -674,8 +675,17 @@ class Ouvido:
         from faster_whisper import WhisperModel
         self.modelo = WhisperModel(tamanho, device="cpu", compute_type="int8",
                                    cpu_threads=12)
+        # A transcricao adiantada roda em thread. Se o usuario voltar a falar
+        # depois do disparo, a transcricao abandonada ainda pode estar viva
+        # quando a definitiva comeca -- o lock impede as duas de entrarem no
+        # mesmo modelo ao mesmo tempo.
+        self._lock = threading.Lock()
 
     def transcrever(self, pcm16, taxa=TAXA_MIC):
+        with self._lock:
+            return self._transcrever(pcm16, taxa)
+
+    def _transcrever(self, pcm16, taxa=TAXA_MIC):
         audio = np.frombuffer(pcm16, dtype=np.int16).astype(np.float32) / 32768.0
         if taxa != 16000:  # o Whisper espera 16 kHz
             n = int(len(audio) * 16000 / taxa)
@@ -826,14 +836,48 @@ def duracao_segundos(pcm, taxa=TAXA_MIC):
     return len(pcm) / float(taxa * BYTES_POR_AMOSTRA)
 
 
-def escutar(limite=25.0):
-    """Grava do microfone ate detectar silencio. Devolve PCM 16 kHz."""
+def _transcrever_em_paralelo(ouvido, pcm, taxa):
+    """Dispara a transcricao numa thread. Devolve (thread, dict de saida)."""
+    saida = {}
+
+    def alvo():
+        try:
+            saida["texto"] = ouvido.transcrever(pcm, taxa)
+        except Exception as e:
+            saida["erro"] = e
+
+    t = threading.Thread(target=alvo, daemon=True)
+    t.start()
+    return t, saida
+
+
+def escutar(ouvido, limite=25.0):
+    """Grava do microfone ate detectar silencio.
+
+    Devolve (PCM 16 kHz, texto ja transcrito ou None).
+
+    O VAD espera VAD_SILENCIO segundos de silencio antes de fechar o turno, e
+    esse tempo era ocioso. Agora a transcricao dispara assim que a voz cai e
+    roda DURANTE a espera -- quando o turno fecha, o texto costuma estar
+    pronto.
+
+    Nao ha perda de precisao: o que vem depois do disparo e silencio, entao o
+    trecho enviado ao Whisper ja contem a fala inteira. O disparo espera
+    VAD_ATRASO_TRANSCRICAO para nao cortar o rabo da ultima palavra -- o RMS e
+    media do bloco, entao ele cai antes de a palavra realmente acabar.
+
+    Se o usuario voltar a falar depois do disparo, o resultado e descartado e
+    a transcricao acontece normalmente no fim. Isso dispara no maximo uma vez
+    por turno: duas transcricoes disputando CPU sairiam mais caro que a espera.
+    """
     fila = queue.Queue()
 
     def cb(indata, frames, t, status):
         fila.put(bytes(indata))
 
     blocos, falou, ultimo_som = [], False, time.time()
+    adiantada = None          # ((thread, saida), marca de ultimo_som no disparo)
+
     with sd.RawInputStream(samplerate=TAXA_MIC, channels=1, dtype="int16",
                            blocksize=BLOCO, callback=cb):
         inicio = time.time()
@@ -852,24 +896,40 @@ def escutar(limite=25.0):
                 blocos.append(b)
             elif falou:
                 blocos.append(b)
-                if time.time() - ultimo_som > VAD_SILENCIO:
+                silencio = time.time() - ultimo_som
+                if adiantada is None and silencio > VAD_ATRASO_TRANSCRICAO:
+                    adiantada = (_transcrever_em_paralelo(
+                        ouvido, b"".join(blocos), TAXA_MIC), ultimo_som)
+                if silencio > VAD_SILENCIO:
                     break
             else:
                 if time.time() - inicio > 5.0:
                     break
-    return b"".join(blocos)
+
+    pcm = b"".join(blocos)
+    texto = None
+    if adiantada is not None:
+        (thread, saida), marca = adiantada
+        if marca == ultimo_som:     # ninguem falou depois do disparo
+            thread.join(timeout=15)
+            texto = saida.get("texto")
+    return pcm, texto
 
 
 # -------------------------------------------------------------------- ciclo
 
-def ciclo(ouvido, voz, pcm, taxa, historico, rotulo=""):
+def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
     global BRILHO_HUD_ATUAL
     e = Etapas()
     if rotulo:
         print('  voce: %r' % rotulo)
 
-    texto = ouvido.transcrever(pcm, taxa)
-    e.marca("1. Whisper (fala -> texto)")
+    if texto_pronto is not None:
+        texto = texto_pronto
+        e.marca("1. Whisper (sobreposto ao VAD)")
+    else:
+        texto = ouvido.transcrever(pcm, taxa)
+        e.marca("1. Whisper (fala -> texto)")
     print("  entendeu: %r" % texto)
     if not texto:
         print("  (nao entendi nada)")
@@ -1065,10 +1125,11 @@ def main():
         print("Pressione Ctrl+C para encerrar.")
         while True:
             print("=" * 60)
-            pcm = escutar()
+            pcm, texto_adiantado = escutar(ouvido)
             if duracao_segundos(pcm) < 0.4:
                 continue
-            historico = ciclo(ouvido, voz, pcm, TAXA_MIC, historico)
+            historico = ciclo(ouvido, voz, pcm, TAXA_MIC, historico,
+                              texto_pronto=texto_adiantado)
             print()
 
 
