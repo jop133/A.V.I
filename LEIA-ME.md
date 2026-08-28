@@ -8,18 +8,25 @@ você fala → VAD → Whisper → contexto de tela → qwen3 → voz
 máquina, não têm cota e não custam nada. Isso é o núcleo do projeto e não
 depende de rede nenhuma.
 
-**A boca e a pesquisa, não.** Três coisas saem daqui, e vale saber quais:
+**A boca, não.** Duas coisas saem daqui, e as duas são só voz:
 
 | Peça | Para onde vai | Quando |
 |---|---|---|
 | Voz (Cartesia) | `api.cartesia.ai`, com chave | motor padrão hoje |
 | Voz (Edge) | Microsoft, sem chave | reserva da Cartesia |
-| `[CONSULTAR:]` | endpoints de terceiros via `g4f` | perguntas que o qwen3 delega |
 
-O terceiro merece atenção: `consultar_gemini_web()` manda junto o **texto da
-janela em foco**. Se for seu email ou seu gerenciador de senhas, vai junto.
-Trocando `MOTOR_VOZ` para `"piper"` e não usando o `[CONSULTAR:]`, o ciclo
-volta a ser inteiramente offline.
+Trocando `MOTOR_VOZ` para `"piper"`, o ciclo volta a ser inteiramente offline.
+
+Duas ferramentas consultam APIs públicas quando você pergunta por elas —
+cotação (AwesomeAPI) e clima (Open-Meteo) — e mandam só o parâmetro, nunca a
+sua tela.
+
+> **O que saiu daqui em 28/ago/2026.** Existia um caminho `[CONSULTAR:]` que
+> mandava perguntas para "o Gemini" via `g4f`. Não era o Google: a `g4f` fala
+> com endpoints de engenharia reversa de terceiros. E mandava junto **o texto
+> da janela em foco** — email, WhatsApp Web, gerenciador de senhas, o que
+> estivesse na frente. Disparava demais: medido, 4 de 6 turnos, até para
+> "capital da França". Foi removido inteiro.
 
 ## Como rodar
 
@@ -49,14 +56,21 @@ com o Piper, medido em 3 turnos locais seguidos:
 | Espera do VAD (deliberada) | 0,70s |
 | Whisper | **0,00s** — roda dentro da espera acima |
 | Contexto de tela (UI Automation) | 0,10s |
-| qwen3:8b até o 1º token | 1,37–1,64s |
+| qwen3:8b até o 1º token | 1,36–1,64s |
 | 1ª frase pronta + Piper | 0,07–0,18s |
-| **Total** | **3,05s** (2,92–3,10s) |
+| **Total** | **3,59s** (3,35–3,64s) |
 
-O ganho maior não é a média — é a **consistência**: a variação ficou em
-**0,18s**. A voz não espera mais a resposta inteira, e o Whisper não aparece
-na conta porque acontece durante um silêncio que já ia existir de qualquer
-jeito.
+O Whisper não aparece na conta porque acontece durante um silêncio que já ia
+existir de qualquer jeito, e a voz não espera mais a resposta inteira.
+
+**Por que 3,59s e não os 3,05s de antes.** As ferramentas declaradas ao modelo
+custam 439 tokens de prefill em **toda** pergunta, inclusive nas que não usam
+ferramenta nenhuma: +0,33s no 1º token, +0,54s no ciclo. É o preço de o modelo
+decidir por intenção em vez de casarmos substrings. `USAR_FERRAMENTAS = False`
+devolve os 0,54s e junto com eles os erros de roteamento.
+
+Turnos de **ferramenta** vão na direção oposta: uma cotação levava 5–19s
+quando caía no caminho web, e agora resolve em ~2,1s.
 
 Referência: o Gemini na nuvem entregou 0,75s — mas com picos de 47s e cota.
 
@@ -105,13 +119,55 @@ No ciclo completo isso fica visível no relatório de etapas: a marca
 `VOZ_STREAMING = False` no topo do `jarvis.py` volta ao comportamento antigo.
 
 **Uma armadilha que essa otimização criou.** Falar antes de a resposta acabar
-significa falar antes de saber se ela era uma tag. O `SeparadorDeFalas`
-segura o começo até ter certeza: se vier `[CONSULTAR:`, nada é falado — quem
-responde é o caminho web. Sem essa trava o Jarvis leria a própria tag em voz
-alta. Vale para `[COR:]`, `[BRILHO:]` e para vazamentos do bloco de tela, onde
-o descarte é da **linha inteira**, não só da tag.
+significa decidir o que é fala antes de ver o texto inteiro. O
+`SeparadorDeFalas` segura o começo enquanto houver um `[` sem `]`: até fechar
+o colchete não dá para saber se aquilo é tag ou texto. Sem essa trava o Jarvis
+leria as próprias tags em voz alta. Vazamentos do bloco de tela (`[TELA]`,
+`[CURSOR]`) têm a **linha inteira** descartada, não só a tag — senão sobraria
+"Janela ativa: Code" para ser falado.
 
-## Duas armadilhas de PROMPT que quebraram o comportamento
+Uma tag cortada no meio pelo `num_predict` (`"[CONSU"`) também é descartada:
+falar o começo de uma tag é pior que perder o pedaço.
+
+## As ações são ferramentas, não substrings
+
+As cinco coisas que o Jarvis sabe *fazer* — mudar tema, ajustar brilho,
+alternar interface, cotação e clima — são declaradas ao qwen3 como ferramentas,
+e ele escolhe por intenção.
+
+Antes eram detectadas por substring **antes de o modelo ver a pergunta**, e
+isso errava nos dois sentidos:
+
+```
+"quanto TEMPO falta pro jogo?"   ->  respondia a previsão do tempo
+"não gosto de AZUL"              ->  trocava o tema da interface
+```
+
+Não era um caso raro: "tempo" é uma das palavras mais comuns do idioma, e o
+gatilho estava em `ferramentas.py`. Medido no ciclo real com ferramentas: **15
+de 16 casos corretos**, incluindo todos os que a versão por substring errava.
+
+Havia também duas fontes de verdade para cor — uma por substring, outra pela
+tag `[COR:]` que o próprio modelo emitia — com regras de casamento diferentes.
+Agora é uma só, o schema.
+
+**Todo argumento é validado antes de agir.** O modelo pode inventar valor fora
+do `enum`, e é melhor dizer que não entendeu do que executar errado:
+
+```
+{"cor": "turquesa"}    ->  "Não conheço a cor turquesa, senhor."
+{"moeda": "dogecoin"}  ->  "Não acompanho dogecoin, senhor."
+{"cidade": "sua cidade"}  ->  tratado como "cidade não informada"
+```
+
+O último é real: o modelo às vezes preenche a cidade com um placeholder
+inventado em vez de omitir o campo. Sem o filtro, o geocoding sairia procurando
+uma cidade chamada "sua cidade".
+
+`USAR_FERRAMENTAS = False` volta aos interceptores por substring e ao prompt
+antigo (`SISTEMA_LEGADO`). Os dois continuam no código para isso.
+
+## Três armadilhas de PROMPT que quebraram o comportamento
 
 **1. Regra anti-alucinação ampla demais.**
 O prompt dizia *"se a resposta não estiver no contexto, diga que não sabe"*.
@@ -125,6 +181,24 @@ com bloco [TELA]:  "capital da França?" -> 'Não sei.'
 
 A regra agora é escopada: o bloco `[TELA]` só vale para perguntas sobre a tela;
 para o resto ele usa o próprio conhecimento.
+
+**3. O bloco de tela desligava as ferramentas.**
+Colar o contexto de tela **antes** da pergunta fazia o modelo parar de chamar
+as ferramentas: a pergunta ficava enterrada embaixo de um muro de dados de
+sistema. Medido, só invertendo a ordem:
+
+```
+[DADOS DO SISTEMA]... + pergunta   ->  6 de 8 corretos
+pergunta + [DADOS DO SISTEMA]...   ->  8 de 8 corretos
+```
+
+Pior: o turno que falhava virava texto no histórico ("Mudando o tema para
+vermelho"), e o modelo passava a **imitar a si mesmo** nos turnos seguintes.
+Um turno ruim contaminava os próximos em cascata — 6 de 12 falhando numa
+conversa contínua contra 1 de 12 depois da inversão.
+
+É a terceira vez que o bloco `[TELA]` muda o comportamento do modelo muito
+além de "dar contexto". Se algo estranho começar a acontecer, suspeite dele.
 
 **2. O Jarvis lia o próprio terminal.**
 Iniciado pelo `.bat`, a janela em foco é o console dele mesmo — e o banner diz
@@ -175,9 +249,11 @@ resto se divide entre a espera do VAD (0,70s, deliberada) e migalhas.
    que economizaria já está escondido na espera do VAD.
 4. **Respostas mais curtas** — o qwen3 é verboso apesar do prompt pedir brevidade.
    Isso não muda o tempo até a primeira palavra, mas muda o tempo até ele calar.
-5. **A regra do `[CONSULTAR:]` dispara cedo demais** — medido: ele delega para
-   a web até "capital da França", que responde sozinho em 0,5s. Cada delegação
-   indevida custa segundos e manda o texto da sua tela para terceiros.
+5. **Os 439 tokens de schema em toda pergunta** — hoje as cinco ferramentas
+   são enviadas mesmo quando a pergunta é "bom dia". Um filtro permissivo, que
+   só decidisse *se* vale anexar os schemas (nunca *qual* chamar, que continua
+   sendo do modelo), devolveria os 0,33s na maioria dos turnos. O risco é o
+   filtro esconder uma ferramenta de uma frase que precisava dela.
 
 ## Trocando a voz
 
