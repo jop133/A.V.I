@@ -7,6 +7,7 @@
 """
 
 import json
+import os
 import re
 import time
 import urllib.parse
@@ -224,8 +225,25 @@ WMO_WEATHER_CODES = {
 }
 
 
+_GEO = {}                 # nome da cidade em minúsculas -> (nome, lat, lon)
+
+
+def cidade_padrao():
+    """Cidade configurada no `.env`, usada quando a pergunta não diz qual.
+
+    Lida a cada chamada, não no import: o `.env` é carregado pelo `jarvis.py`
+    depois de importar este módulo.
+    """
+    return (os.getenv("CIDADE_PADRAO") or "").strip()
+
+
 def obter_cidade_ip(prazo=None):
-    """Detecta a cidade atual do usuário via geolocalização por IP (gratuita)."""
+    """Descobre a cidade pelo IP. É o ÚLTIMO recurso.
+
+    O endpoint gratuito do ip-api só atende em **HTTP puro**: sua cidade e
+    coordenadas voltam em texto claro pela rede. Configurar `CIDADE_PADRAO`
+    no `.env` faz esta função nunca ser chamada.
+    """
     data = _pedir_json("http://ip-api.com/json/?fields=status,city,regionName,lat,lon", prazo)
     if data and data.get("status") == "success":
         return (data.get("city", "São Paulo"), data.get("lat"), data.get("lon"))
@@ -233,28 +251,45 @@ def obter_cidade_ip(prazo=None):
 
 
 def geocodificar_cidade(nome_cidade, prazo=None):
-    """Busca latitude e longitude de qualquer cidade do mundo pelo nome."""
+    """Latitude e longitude de uma cidade pelo nome, com cache em memória.
+
+    O cache importa: sem ele, toda pergunta de clima gastaria duas viagens de
+    rede (geocoding + previsão). Coordenada de cidade não muda, então a
+    primeira pergunta paga as duas e as seguintes pagam uma.
+    """
+    chave = nome_cidade.lower().strip()
+    if chave in _GEO:
+        return _GEO[chave]
+
     cidade_enc = urllib.parse.quote(nome_cidade)
     data = _pedir_json(
         f"https://geocoding-api.open-meteo.com/v1/search"
         f"?name={cidade_enc}&count=1&language=pt&format=json", prazo)
     if data and data.get("results"):
         primeiro = data["results"][0]
-        return (primeiro.get("name", nome_cidade),
-                primeiro.get("latitude"), primeiro.get("longitude"))
+        achado = (primeiro.get("name", nome_cidade),
+                  primeiro.get("latitude"), primeiro.get("longitude"))
+        _GEO[chave] = achado
+        return achado
     return None
+
+
+def _localizar(cidade_solicitada, prazo):
+    """Resolve (nome, lat, lon) na ordem: pedida -> padrão do .env -> IP."""
+    for candidata in (cidade_solicitada, cidade_padrao()):
+        if candidata:
+            geo = geocodificar_cidade(candidata, prazo)
+            if geo:
+                return geo
+    return obter_cidade_ip(prazo)
 
 
 def obter_clima(cidade_solicitada=None):
     """Obtém dados meteorológicos ao vivo do Open-Meteo."""
-    chave = "clima:" + (cidade_solicitada or "").lower().strip()
+    chave = "clima:" + (cidade_solicitada or cidade_padrao() or "ip").lower().strip()
     prazo = time.monotonic() + ORCAMENTO
 
-    if cidade_solicitada:
-        geo = geocodificar_cidade(cidade_solicitada, prazo)
-        cidade, lat, lon = geo if geo else obter_cidade_ip(prazo)
-    else:
-        cidade, lat, lon = obter_cidade_ip(prazo)
+    cidade, lat, lon = _localizar(cidade_solicitada, prazo)
 
     data = _pedir_json(
         f"https://api.open-meteo.com/v1/forecast?"

@@ -21,6 +21,14 @@ Duas ferramentas consultam APIs públicas quando você pergunta por elas —
 cotação (AwesomeAPI) e clima (Open-Meteo) — e mandam só o parâmetro, nunca a
 sua tela.
 
+**Configure `CIDADE_PADRAO` no `.env`.** Sem ela, perguntar o clima sem dizer
+a cidade faz o Jarvis descobrir onde você está batendo no `ip-api.com`, que no
+plano gratuito só atende em **HTTP puro** — sua cidade e coordenadas voltam em
+texto claro pela rede. Com a cidade configurada essa chamada deixa de existir,
+e de quebra a previsão fica mais rápida: as coordenadas ficam em cache, então
+da segunda pergunta em diante sobra uma requisição só (medido: 1,62s na
+primeira, 0,74s nas seguintes).
+
 > **O que saiu daqui em 28/ago/2026.** Existia um caminho `[CONSULTAR:]` que
 > mandava perguntas para "o Gemini" via `g4f`. Não era o Google: a `g4f` fala
 > com endpoints de engenharia reversa de terceiros. E mandava junto **o texto
