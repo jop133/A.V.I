@@ -79,6 +79,7 @@ OLLAMA = "http://127.0.0.1:11434"
 
 TAXA_MIC = 16000
 BLOCO = 1024
+BYTES_POR_AMOSTRA = 2     # PCM 16 bits mono -- 1 amostra = 2 bytes
 VAD_LIMIAR = 180.0        # RMS ideal e sensível para captação natural de voz
 VAD_SILENCIO = 0.7        # segundos de silêncio para fechar o turno de fala
 SISTEMA = """Voce e o Jarvis, assistente pessoal do Joao Pedro, rodando LOCALMENTE no PC dele.
@@ -209,38 +210,71 @@ class Voz:
             self.piper_voz = PiperVoice.load(str(VOZ_TTS))
         return self.piper_voz
 
-    def _obter_cache(self, texto, motor):
-        """Retorna PCM em cache se existir (RAM ou Disco). Custo computacional < 0.2ms."""
+    @staticmethod
+    def _hash_cache(texto, motor):
+        """Chave normalizada do cache: (texto sem espacos duplos e em minusculas, hash)."""
         texto_norm = " ".join(texto.strip().split()).lower()
         if not texto_norm:
+            return None, None
+        h = hashlib.md5(f"{motor}_{texto_norm}".encode("utf-8")).hexdigest()
+        return texto_norm, h
+
+    def _obter_cache(self, texto, motor):
+        """Retorna (PCM, taxa) do cache se existir (RAM ou Disco). Custo < 0.2ms.
+
+        A taxa viaja NO NOME do arquivo (`{hash}.{taxa}.pcm`). Antes ela era
+        adivinhada como 24000 na leitura, o que quebrava o Piper: ele gera a
+        22050 Hz, entao tudo que voltava do cache dele tocava 8,8% acelerado
+        -- mais agudo e mais rapido, justamente no motor que atende quando a
+        internet cai.
+
+        Arquivos do esquema antigo (`{hash}.pcm`) continuam valendo para
+        Cartesia e Edge, que sao 24000 de verdade. Para o Piper eles sao
+        ignorados: ressintetizar custa 0,10s e nenhum credito, entao nao ha
+        motivo para arriscar tocar um arquivo de taxa desconhecida.
+        """
+        texto_norm, h = self._hash_cache(texto, motor)
+        if not texto_norm:
             return None
-        
+
         # 1. Checa memoria RAM (< 0.01ms)
         chave_ram = (motor, texto_norm)
         if chave_ram in CACHE_MEMORIA:
             return CACHE_MEMORIA[chave_ram]
 
-        # 2. Checa disco (< 0.3ms)
-        h = hashlib.md5(f"{motor}_{texto_norm}".encode("utf-8")).hexdigest()
-        caminho = CACHE_VOZ / f"{h}.pcm"
-        if caminho.exists():
+        # 2. Checa disco no esquema novo: a taxa esta no nome (< 0.3ms)
+        for caminho in CACHE_VOZ.glob(f"{h}.*.pcm"):
+            try:
+                taxa = int(caminho.name.split(".")[-2])
+            except (ValueError, IndexError):
+                continue
             try:
                 pcm = caminho.read_bytes()
-                taxa = CARTESIA_TAXA if motor == "cartesia" else 24000
-                CACHE_MEMORIA[chave_ram] = (pcm, taxa)
-                return pcm, taxa
             except Exception:
-                pass
+                continue
+            CACHE_MEMORIA[chave_ram] = (pcm, taxa)
+            return pcm, taxa
+
+        # 3. Esquema antigo, sem taxa no nome: confiavel apenas fora do Piper.
+        if motor != "piper":
+            caminho = CACHE_VOZ / f"{h}.pcm"
+            if caminho.exists():
+                try:
+                    pcm = caminho.read_bytes()
+                    CACHE_MEMORIA[chave_ram] = (pcm, 24000)
+                    return pcm, 24000
+                except Exception:
+                    pass
         return None
 
     def _salvar_cache(self, texto, motor, pcm, taxa):
         """Salva PCM no cache em disco e memoria RAM de forma instantanea."""
         try:
-            texto_norm = " ".join(texto.strip().split()).lower()
-            chave_ram = (motor, texto_norm)
-            CACHE_MEMORIA[chave_ram] = (pcm, taxa)
-            h = hashlib.md5(f"{motor}_{texto_norm}".encode("utf-8")).hexdigest()
-            caminho = CACHE_VOZ / f"{h}.pcm"
+            texto_norm, h = self._hash_cache(texto, motor)
+            if not texto_norm:
+                return
+            CACHE_MEMORIA[(motor, texto_norm)] = (pcm, taxa)
+            caminho = CACHE_VOZ / f"{h}.{int(taxa)}.pcm"
             caminho.write_bytes(pcm)
         except Exception:
             pass
@@ -475,6 +509,16 @@ def preaquecer():
 
 # ---------------------------------------------------------------- microfone
 
+def duracao_segundos(pcm, taxa=TAXA_MIC):
+    """Duracao real de um bloco de PCM 16 bits mono, em segundos.
+
+    Existe para nao comparar bytes com amostras. O bug que motivou o helper:
+    `len(pcm) < TAXA_MIC * 0.4` parece "menos de 0,4s", mas `len(pcm)` esta em
+    BYTES e TAXA_MIC em AMOSTRAS -- o limiar real era a metade, 0,2s.
+    """
+    return len(pcm) / float(taxa * BYTES_POR_AMOSTRA)
+
+
 def escutar(limite=25.0):
     """Grava do microfone ate detectar silencio. Devolve PCM 16 kHz."""
     fila = queue.Queue()
@@ -680,7 +724,7 @@ def main():
         while True:
             print("=" * 60)
             pcm = escutar()
-            if len(pcm) < TAXA_MIC * 0.4:
+            if duracao_segundos(pcm) < 0.4:
                 continue
             historico = ciclo(ouvido, voz, pcm, TAXA_MIC, historico)
             print()

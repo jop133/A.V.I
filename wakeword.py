@@ -111,7 +111,10 @@ class DetectorWakeWord:
                         blocos_fala = []
 
                         # Transcreve apenas este pequeno trecho
-                        if self.ouvido_stt and len(pcm_total) > TAXA_AMOSTRAGEM * 0.4:
+                        # len() esta em BYTES e a taxa em AMOSTRAS: PCM 16 bits
+                        # gasta 2 bytes por amostra, senao o limiar vale a metade.
+                        dur = len(pcm_total) / float(TAXA_AMOSTRAGEM * 2)
+                        if self.ouvido_stt and dur > 0.4:
                             texto = self.ouvido_stt.transcrever(pcm_total, TAXA_AMOSTRAGEM)
                             texto_limpo = texto.lower().strip()
 

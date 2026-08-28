@@ -9,6 +9,21 @@ Custa milissegundos e nao depende de modelo nenhum.
 
 import numpy as np
 
+# Ganho de saida fixo. Vale para TODOS os blocos, e e o que mantem o volume
+# estavel entre frases quando a voz sai em pedacos.
+#
+# Calibrado medindo 5 frases de intensidades diferentes no Piper. O valor
+# compensa a perda de volume de trocar normalizacao por ganho fixo:
+#
+#   ganho   pico medio   pico maximo   amostras limitadas
+#   0.94       0.675        0.728            0.00%
+#   1.20       0.852        0.903            0.01%   <- escolhido
+#   1.45       0.914        0.922            0.34%
+#
+# O codigo antigo entregava 0.940 em TODA frase; 1.20 chega perto disso
+# (-0,85 dB, imperceptivel) sem achatar a diferenca entre as frases.
+GANHO_SAIDA = 1.20
+
 # O import do scipy.signal custa alguns segundos e precisa acontecer no carga
 # do modulo, nunca dentro da funcao -- na primeira medicao isso apareceu como
 # 9.8s de "processamento" que na verdade era o import.
@@ -18,19 +33,27 @@ except Exception:
     _lfilter = None
 
 
-def _reverb(sinal, taxa, quantidade=0.18):
+def _reverb(sinal, taxa, quantidade=0.18, cauda_ms=120):
     """Reverberacao curta, estilo sala pequena.
 
     Somamos copias atrasadas e atenuadas do sinal. Atrasos primos evitam que os
     ecos coincidam e criem aquele som metalico de 'lata'.
+
+    O bloco e estendido por `cauda_ms` de silencio ANTES de somar os ecos. Sem
+    isso o ultimo eco e cortado na borda do bloco: a sala some de repente em
+    vez de decair. Com a voz saindo frase a frase esse corte acontece a cada
+    frase, e o resultado soa picotado.
     """
-    saida = sinal.copy()
+    n_cauda = int(taxa * cauda_ms / 1000.0)
+    base = np.concatenate([sinal, np.zeros(n_cauda, dtype=sinal.dtype)])
+
+    saida = base.copy()
     for atraso_ms, ganho in ((23, 0.55), (37, 0.38), (53, 0.26), (71, 0.16)):
         n = int(taxa * atraso_ms / 1000.0)
-        if n >= len(sinal):
+        if n >= len(base):
             continue
-        eco = np.zeros_like(sinal)
-        eco[n:] = sinal[:-n] * ganho
+        eco = np.zeros_like(base)
+        eco[n:] = base[:-n] * ganho
         saida += eco * quantidade
     return saida
 
@@ -53,6 +76,25 @@ def _realce_graves(sinal, taxa, ganho=1.35, corte=220.0):
             graves[i] = anterior
 
     return sinal + graves * (ganho - 1.0)
+
+
+def _limitar(sinal, teto=0.90):
+    """Limitador de joelho suave: segura so os picos, sem mexer no corpo.
+
+    Substitui a normalizacao por bloco. Um limitador olha para o pico
+    ABSOLUTO (teto fixo); a normalizacao olhava para o pico RELATIVO daquele
+    bloco, o que faz cada bloco terminar no mesmo volume independente de quao
+    alto ele era de fato.
+    """
+    magnitude = np.abs(sinal)
+    acima = magnitude > teto
+    if not acima.any():
+        return sinal
+    saida = sinal.copy()
+    excedente = magnitude[acima] - teto
+    # tanh comprime o excedente para dentro da margem restante, sem corte duro.
+    saida[acima] = np.sign(sinal[acima]) * (teto + np.tanh(excedente) * (1.0 - teto))
+    return saida
 
 
 def _comprimir(sinal, limiar=0.35, razao=2.5):
@@ -87,8 +129,11 @@ def tratar(pcm_int16, taxa, reverb=0.18, graves=1.35, compressao=True):
     if reverb:
         sinal = _reverb(sinal, taxa, reverb)
 
-    # Normaliza para nao estourar depois de somar tudo.
-    pico = float(np.max(np.abs(sinal))) or 1.0
-    sinal = sinal / pico * 0.94
+    # Ganho FIXO, nao normalizacao. A normalizacao por bloco levava todo bloco
+    # ao mesmo pico: numa fala unica isso passa despercebido, mas com a voz
+    # saindo frase a frase cada frase vira um bloco e o volume pulsa -- um
+    # sussurro e um grito sairiam no mesmo nivel. O limitador abaixo segura os
+    # picos sem achatar a diferenca entre as frases.
+    sinal = _limitar(sinal * GANHO_SAIDA)
 
     return (sinal * 32767).astype(np.int16).tobytes()
