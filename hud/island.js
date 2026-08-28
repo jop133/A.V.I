@@ -1,3 +1,11 @@
+// O token da sessao chega pela query string da URL (ver hud_app.py). Sem ele
+// o servidor devolve 403 -- e o que impede um site qualquer aberto no
+// navegador de abrir este mesmo EventSource e ler o que o usuario fala.
+function urlDosEventos() {
+    const token = new URLSearchParams(location.search).get('token') || '';
+    return 'http://127.0.0.1:8765/events?token=' + encodeURIComponent(token);
+}
+
 /**
  * J.A.R.V.I.S. DYNAMIC ISLAND - LOGIC & THREE.JS ENGINE
  */
@@ -202,7 +210,7 @@ function initWaveform() {
 // 3. Conexão em Tempo Real com o Jarvis
 // --------------------------------------------------------------------------
 function initEventStream() {
-    const url = 'http://127.0.0.1:8765/events';
+    const url = urlDosEventos();
     let source = null;
 
     function connect() {

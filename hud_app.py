@@ -80,8 +80,22 @@ def forcar_maximizacao_confiavel(target_pid=None):
         except Exception:
             pass
 
-def main():
+def _url_com_token():
+    """URI file:// da HUD com o token da sessao.
+
+    O app.js roda de file:// e nao consegue ler .hud_token do disco (fetch em
+    file:// e bloqueado), entao o token chega pela query string da propria URL.
+    """
     url = HUD_HTML.resolve().as_uri()
+    try:
+        token = (BASE / ".hud_token").read_text(encoding="utf-8").strip()
+    except Exception:
+        token = ""
+    return f"{url}?token={token}" if token else url
+
+
+def main():
+    url = _url_com_token()
     exe = encontrar_executavel()
 
     t = threading.Thread(target=forcar_maximizacao_confiavel, daemon=True)

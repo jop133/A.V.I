@@ -1,3 +1,11 @@
+// O token da sessao chega pela query string da URL (ver hud_app.py). Sem ele
+// o servidor devolve 403 -- e o que impede um site qualquer aberto no
+// navegador de abrir este mesmo EventSource e ler o que o usuario fala.
+function urlDosEventos() {
+    const token = new URLSearchParams(location.search).get('token') || '';
+    return 'http://127.0.0.1:8765/events?token=' + encodeURIComponent(token);
+}
+
 /**
  * J.A.R.V.I.S. COSMOS SHADER ENGINE - 100% IDÊNTICO AO TRILLION (HELLOTRILLION.AI)
  * Suporte a Temas de Cores Dinâmicos, Controle de Brilho e Modo Orbe Superior (Top Orb)
@@ -935,7 +943,7 @@ function initTrillionCosmosEngine() {
 // Conexão em Tempo Real com o Jarvis (Server-Sent Events)
 // --------------------------------------------------------------------------
 function initEventStream() {
-    const eventsUrl = 'http://127.0.0.1:8765/events';
+    const eventsUrl = urlDosEventos();
     let evtSource = null;
 
     function connect() {

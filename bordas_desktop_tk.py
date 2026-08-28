@@ -15,6 +15,7 @@ import time
 import json
 import threading
 import urllib.request
+from urllib.parse import quote
 import tkinter as tk
 
 base_prefix = getattr(sys, 'base_prefix', sys.prefix)
@@ -24,6 +25,21 @@ if os.path.exists(tcl_path) and "TCL_LIBRARY" not in os.environ:
     os.environ["TCL_LIBRARY"] = tcl_path
 if os.path.exists(tk_path) and "TK_LIBRARY" not in os.environ:
     os.environ["TK_LIBRARY"] = tk_path
+
+
+def _url_dos_eventos():
+    """URL do SSE com o token da sessao, lido de .hud_token na raiz do projeto.
+
+    Sem token o servidor responde 403. Se o Jarvis nao estiver rodando o
+    arquivo nao existe, a conexao falha e a interface fica em modo offline --
+    que e o comportamento correto.
+    """
+    try:
+        raiz = os.path.dirname(os.path.abspath(__file__))
+        token = open(os.path.join(raiz, ".hud_token"), encoding="utf-8").read().strip()
+    except Exception:
+        token = ""
+    return "http://127.0.0.1:8765/events?token=" + quote(token)
 
 PALETAS = {
     "ciano": {
@@ -171,7 +187,7 @@ class JarvisAmbientEdgeOverlay:
     def _escutar_sse(self):
         while True:
             try:
-                req = urllib.request.Request("http://127.0.0.1:8765/events", headers={"Accept": "text/event-stream"})
+                req = urllib.request.Request(_url_dos_eventos(), headers={"Accept": "text/event-stream"})
                 with urllib.request.urlopen(req, timeout=30) as resp:
                     for line in resp:
                         txt = line.decode("utf-8").strip()

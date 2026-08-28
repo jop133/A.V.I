@@ -5,6 +5,10 @@ __pycache__/
 # Segredos: chaves de API
 .env
 
+# Token do SSE, sorteado a cada boot -- e o que impede um site qualquer
+# aberto no navegador de ler o que o usuario fala pela ponte da HUD.
+.hud_token
+
 # Modelos e amostras (pesados, baixados sob demanda)
 vozes/*.onnx
 vozes/*.onnx.json

@@ -1,3 +1,11 @@
+// O token da sessao chega pela query string da URL (ver hud_app.py). Sem ele
+// o servidor devolve 403 -- e o que impede um site qualquer aberto no
+// navegador de abrir este mesmo EventSource e ler o que o usuario fala.
+function urlDosEventos() {
+    const token = new URLSearchParams(location.search).get('token') || '';
+    return 'http://127.0.0.1:8765/events?token=' + encodeURIComponent(token);
+}
+
 /**
  * J.A.R.V.I.S. DESKTOP CORE ORB - 100% TRANSPARENTE E SEM MOLDURAS
  * Renderiza exclusivamente o cérebro 3D com reação dinâmica ao som em tempo real
@@ -338,7 +346,7 @@ function initDesktopOrb() {
 }
 
 function initEventStream() {
-    const eventsUrl = 'http://127.0.0.1:8765/events';
+    const eventsUrl = urlDosEventos();
     let evtSource = null;
 
     function connect() {

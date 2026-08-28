@@ -5,20 +5,57 @@ Utiliza um servidor HTTP / Server-Sent Events (SSE) nativo e ultra-leve
 para transmitir o estado do Jarvis, textos e telemetria para a HUD em tempo real.
 """
 
+import hmac
 import json
 import queue
+import secrets
 import subprocess
 import sys
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
 
 BASE = Path(__file__).parent
 FILA_EVENTOS = queue.Queue()
 CLIENTES = set()
 LOCK = threading.Lock()
 PORTA_HUD = 8765
+
+# O servidor escuta em 127.0.0.1, o que da uma falsa sensacao de seguranca:
+# QUALQUER site aberto no navegador consegue abrir um EventSource para
+# localhost. Com o antigo `Access-Control-Allow-Origin: *`, uma pagina hostil
+# lia em tempo real tudo que o usuario fala (userSpeech) e todas as janelas
+# que ele usa (windowTitle).
+#
+# Restringir a origem nao resolve: uma pagina consegue origem "null" por
+# iframe sandbox. O que resolve e um segredo que ela nao tem como adivinhar.
+# O token e sorteado a cada boot e fica em .hud_token, lido pelas interfaces
+# que rodam localmente (mesmo nivel de confianca do .env).
+ARQUIVO_TOKEN = BASE / ".hud_token"
+TOKEN = None
+
+
+def _gerar_token():
+    """Sorteia o token do boot e publica em .hud_token para as interfaces."""
+    global TOKEN
+    TOKEN = secrets.token_urlsafe(32)
+    try:
+        ARQUIVO_TOKEN.write_text(TOKEN, encoding="utf-8")
+    except Exception as e:
+        print(f"  [HUD] Nao consegui gravar {ARQUIVO_TOKEN.name}: {e}")
+    return TOKEN
+
+
+def token_atual():
+    """Token desta sessao. As interfaces avulsas leem do arquivo."""
+    if TOKEN:
+        return TOKEN
+    try:
+        return ARQUIVO_TOKEN.read_text(encoding="utf-8").strip()
+    except Exception:
+        return ""
 
 class ServidorHUD(BaseHTTPRequestHandler):
     def log_message(self, format, *args):
@@ -27,18 +64,45 @@ class ServidorHUD(BaseHTTPRequestHandler):
 
     def do_OPTIONS(self):
         self.send_response(200)
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Origin", "null")
+        self.send_header("Access-Control-Allow-Methods", "GET, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "*")
         self.end_headers()
 
+    def _token_confere(self):
+        """O ?token= da requisicao bate com o desta sessao?
+
+        Comparacao em tempo constante (compare_digest) por higiene: evita que
+        o tempo de resposta revele quantos caracteres do token estao certos.
+        """
+        esperado = token_atual()
+        if not esperado:
+            return False
+        enviado = parse_qs(urlparse(self.path).query).get("token", [""])[0]
+        return hmac.compare_digest(enviado, esperado)
+
     def do_GET(self):
-        if self.path == "/events":
+        caminho = urlparse(self.path).path
+
+        if caminho == "/events":
+            if not self._token_confere():
+                # Sem CORS na negativa: a pagina nem chega a ler o corpo.
+                self.send_response(403)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                try:
+                    self.wfile.write(b'{"erro":"token ausente ou invalido"}')
+                except Exception:
+                    pass
+                return
+
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
             self.send_header("Cache-Control", "no-cache")
             self.send_header("Connection", "keep-alive")
-            self.send_header("Access-Control-Allow-Origin", "*")
+            # A HUD roda de file://, cuja origem e "null". O token e que
+            # autoriza de fato -- este header so destrava a leitura no browser.
+            self.send_header("Access-Control-Allow-Origin", "null")
             self.end_headers()
 
             q = queue.Queue()
@@ -72,7 +136,7 @@ class ServidorHUD(BaseHTTPRequestHandler):
             try:
                 self.send_response(200)
                 self.send_header("Content-Type", "application/json")
-                self.send_header("Access-Control-Allow-Origin", "*")
+                self.send_header("Access-Control-Allow-Origin", "null")
                 self.end_headers()
                 self.wfile.write(b'{"status":"ok"}')
             except Exception:
@@ -219,6 +283,7 @@ def abrir_hud(modo="completo"):
 
 def iniciar(auto_abrir=True, modo_inicial="completo"):
     """Inicia o servidor em segundo plano e abre a interface escolhida."""
+    _gerar_token()
     t = threading.Thread(target=_rodar_servidor, daemon=True)
     t.start()
     time.sleep(0.3)
