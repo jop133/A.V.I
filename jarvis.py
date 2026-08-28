@@ -73,6 +73,12 @@ SALA_COMPRESSAO = True
 # inteira. Ponha False para voltar ao modo antigo (falar so no fim).
 VOZ_STREAMING = True
 
+# O modelo escolhe as acoes por function calling em vez de casarmos
+# substrings antes dele ver a pergunta. False volta aos interceptores
+# antigos (processar_comando_interface / processar_ferramenta), que
+# continuam no codigo justamente para isso.
+USAR_FERRAMENTAS = True
+
 # Piper TTS (100% offline)
 VOZ_TTS = BASE / "vozes" / "pt_BR-faber-medium.onnx"
 
@@ -88,21 +94,26 @@ BYTES_POR_AMOSTRA = 2     # PCM 16 bits mono -- 1 amostra = 2 bytes
 VAD_LIMIAR = 180.0        # RMS ideal e sensível para captação natural de voz
 VAD_SILENCIO = 0.7        # segundos de silêncio para fechar o turno de fala
 VAD_ATRASO_TRANSCRICAO = 0.25  # espera antes de disparar a transcricao adiantada
+# O prompt de sistema e lido INTEIRO antes do primeiro token sair, e o 1o
+# token virou o gargalo do ciclo (1,37-1,64s dos 3,05s) depois que o Whisper
+# passou a rodar dentro da espera do VAD. Tudo que virou schema de ferramenta
+# saiu daqui: lista de cores, regras de brilho, modulos de tempo real e a
+# regra do [CONSULTAR:]. Sobra personalidade e formato de fala.
 SISTEMA = """Voce e o Jarvis, assistente pessoal do Joao Pedro, rodando LOCALMENTE no PC dele.
 
 Regras:
 - Responda SEMPRE em portugues do Brasil, de forma extremamente concisa (no maximo 1 ou 2 frases curtas e diretas). Esta e uma conversa por voz em tempo real.
 - NUNCA repita, leia ou exiba tags de telemetria como [TELA], [CURSOR] ou [CONTEUDO VISIVEL]. Elas sao dados invisiveis do sistema para sua orientacao silenciosa. Fale apenas o dialogo com o senhor.
-- Nunca faça listas longas nem use introduções ou saudações repetitivas.
-- AÇÕES DE COR DA INTERFACE: Se o usuario pedir para mudar a cor ou tema da interface (qualquer solicitacao de cor como vermelho, verde, azul, ciano, roxo, dourado, branco, rosa), inclua a tag [COR: nome_da_cor] no inicio da sua resposta.
-  Exemplo: "Jarvis, coloca vermelho" -> "[COR: vermelho] Alterando paleta para vermelho Stark, senhor."
-  Exemplo: "Quero tema verde" -> "[COR: verde] Paleta verde Matrix ativada."
-  Cores validas: vermelho, verde, azul, ciano, roxo, dourado, branco, rosa.
-- AÇÕES DE BRILHO: Se o usuario pedir mais claro ou mais escuro, use [BRILHO: +] ou [BRILHO: -] no inicio.
-  Exemplo: "Aumenta o brilho" -> "[BRILHO: +] Aumentando luminosidade do núcleo, senhor."
-  Exemplo: "Deixa mais escuro" -> "[BRILHO: -] Diminuindo brilho para modo discreto, senhor."
-- MÓDULOS DE TEMPO REAL: Cotações financeiras (Dólar, Euro, Bitcoin, etc.) e Previsão do Tempo são fornecidas diretamente por fontes em tempo real.
-- IMPORTANTE: Se o usuario fizer uma pergunta complexa, pedir pesquisas dificeis, ou algo alem do seu conhecimento imediato, responda APENAS com a tag: [CONSULTAR: a pergunta do usuario]. Nao escreva mais nada. Exemplo: [CONSULTAR: qual a populacao do japao?]"""
+- Nunca faca listas longas nem use introducoes ou saudacoes repetitivas.
+- Trate o usuario por "senhor" com naturalidade, sem exagero."""
+
+# Prompt do modo de rollback (USAR_FERRAMENTAS = False). Descreve as tags que
+# os interceptores antigos sabem interpretar. So e usado nesse modo -- manter
+# os dois evita que voltar atras exija desfazer commit.
+SISTEMA_LEGADO = SISTEMA + """
+- ACOES DE COR DA INTERFACE: Se o usuario pedir para mudar a cor ou tema da interface (vermelho, verde, azul, ciano, roxo, dourado, branco, rosa), inclua a tag [COR: nome_da_cor] no inicio da sua resposta.
+- ACOES DE BRILHO: Se o usuario pedir mais claro ou mais escuro, use [BRILHO: +] ou [BRILHO: -] no inicio.
+- MODULOS DE TEMPO REAL: Cotacoes financeiras e Previsao do Tempo sao fornecidas por fontes em tempo real."""
 
 # ----------------------------------------------------------------- temas & controle de interface HUD
 BRILHO_HUD_ATUAL = 1.0
@@ -175,6 +186,141 @@ def processar_comando_interface(texto):
     return None
 
 
+# ----------------------------------------------------------------- ferramentas do modelo
+
+# As acoes que o Jarvis sabe executar, declaradas para o qwen3 escolher por
+# INTENCAO. Antes isso era feito por substring antes do modelo ver a pergunta,
+# e errava de dois jeitos opostos:
+#
+#   "quanto TEMPO falta pro jogo?"  -> respondia a previsao do tempo
+#   "nao gosto de AZUL"             -> trocava o tema da interface
+#
+# Medido com estes schemas: 14 de 14 casos corretos, incluindo todos os que a
+# versao por substring errava. O custo e ~0,9s de ida ao modelo para decidir,
+# onde antes a deteccao era instantanea -- e a troca que compra o acerto.
+
+CORES_VALIDAS = ["vermelho", "verde", "azul", "ciano",
+                 "roxo", "dourado", "branco", "rosa"]
+
+FERRAMENTAS_LLM = [
+    {"type": "function", "function": {
+        "name": "mudar_tema",
+        "description": "Muda a cor da interface HUD do Jarvis. Use SOMENTE quando o "
+                       "usuario pedir para mudar a cor ou o tema da interface.",
+        "parameters": {"type": "object", "properties": {
+            "cor": {"type": "string", "enum": CORES_VALIDAS}}, "required": ["cor"]}}},
+
+    {"type": "function", "function": {
+        "name": "ajustar_brilho",
+        "description": "Aumenta ou diminui o brilho da interface HUD.",
+        "parameters": {"type": "object", "properties": {
+            "direcao": {"type": "string", "enum": ["aumentar", "diminuir"]}},
+            "required": ["direcao"]}}},
+
+    {"type": "function", "function": {
+        "name": "alternar_interface",
+        "description": "Troca o formato da interface na tela: 'orbe' e uma esfera "
+                       "flutuante compacta, 'bordas' sao luzes nas bordas do monitor, "
+                       "'completo' e o painel inteiro.",
+        "parameters": {"type": "object", "properties": {
+            "modo": {"type": "string", "enum": ["orbe", "bordas", "completo"]}},
+            "required": ["modo"]}}},
+
+    {"type": "function", "function": {
+        "name": "obter_cotacao",
+        "description": "Cotacao ao vivo de uma moeda em reais. Use apenas para "
+                       "perguntas sobre o valor ou preco de uma moeda.",
+        "parameters": {"type": "object", "properties": {
+            "moeda": {"type": "string",
+                      "enum": ["dolar", "euro", "bitcoin", "ethereum", "libra", "iene"]}},
+            "required": ["moeda"]}}},
+
+    {"type": "function", "function": {
+        "name": "obter_clima",
+        "description": "Previsao do tempo ao vivo: temperatura, chuva, umidade e vento. "
+                       "Use SOMENTE para meteorologia. NUNCA use para a palavra 'tempo' "
+                       "no sentido de duracao, demora ou horas.",
+        "parameters": {"type": "object", "properties": {
+            "cidade": {"type": "string",
+                       "description": "Nome da cidade. Omita para usar a cidade atual."}}}}},
+]
+
+# O modelo as vezes preenche a cidade com um placeholder em vez de omitir o
+# campo -- medido: {"cidade": "sua cidade"}. Sem este filtro o geocoding sairia
+# procurando uma cidade chamada "sua cidade".
+CIDADES_PLACEHOLDER = {
+    "", "sua cidade", "minha cidade", "cidade atual", "cidade do usuario",
+    "atual", "aqui", "local", "none", "null", "n/a", "desconhecida",
+}
+
+
+def executar_ferramenta(nome, argumentos):
+    """Executa uma ferramenta pedida pelo modelo.
+
+    Devolve (texto_para_falar, dados_para_a_hud).
+
+    Todo argumento e validado antes de agir: o modelo pode inventar um valor
+    fora do enum, e e melhor dizer que nao entendeu do que executar errado.
+    """
+    global BRILHO_HUD_ATUAL
+    args = argumentos or {}
+    if isinstance(args, str):                    # alguns modelos mandam JSON cru
+        try:
+            args = json.loads(args)
+        except Exception:
+            args = {}
+
+    if nome == "mudar_tema":
+        cor = str(args.get("cor", "")).lower().strip()
+        alvo = PALETAS_MAPA.get(cor)
+        if not alvo:
+            return "Nao conheco a cor %s, senhor." % (cor or "pedida"), {}
+        tema_id, resposta = alvo
+        return resposta, {"theme": tema_id}
+
+    if nome == "ajustar_brilho":
+        direcao = str(args.get("direcao", "")).lower().strip()
+        if direcao.startswith("aum"):
+            BRILHO_HUD_ATUAL = min(2.0, round(BRILHO_HUD_ATUAL + 0.35, 2))
+        elif direcao.startswith("dim"):
+            BRILHO_HUD_ATUAL = max(0.25, round(BRILHO_HUD_ATUAL - 0.35, 2))
+        else:
+            return "Nao entendi se era para aumentar ou diminuir, senhor.", {}
+        return ("Brilho do nucleo em %d%%, senhor." % int(BRILHO_HUD_ATUAL * 100),
+                {"brightness": BRILHO_HUD_ATUAL})
+
+    if nome == "alternar_interface":
+        modo = str(args.get("modo", "")).lower().strip()
+        destinos = {
+            "orbe":     ("orbe", "Ativando modo orbe compacto, senhor."),
+            "bordas":   ("borda", "Ativando modo bordas ambientais, senhor."),
+            "completo": ("completo", "Restaurando painel completo, senhor."),
+        }
+        if modo not in destinos:
+            return "Nao conheco esse modo de interface, senhor.", {}
+        alvo, resposta = destinos[modo]
+        hud_bridge.alternar_interface(alvo)
+        return resposta, {}
+
+    if nome == "obter_cotacao":
+        moeda = str(args.get("moeda", "")).lower().strip()
+        par = ferramentas.MOEDAS_MAPA.get(moeda)
+        if not par:
+            return "Nao acompanho %s, senhor." % (moeda or "essa moeda"), {}
+        return (ferramentas.obter_cotacao(par)
+                or "Nao consegui a cotacao agora, senhor."), {}
+
+    if nome == "obter_clima":
+        cidade = str(args.get("cidade") or "").strip()
+        if cidade.lower() in CIDADES_PLACEHOLDER:
+            cidade = ""
+        return (ferramentas.obter_clima(cidade or None)
+                or "Nao consegui a previsao agora, senhor."), {}
+
+    print("  [Ferramenta desconhecida pedida pelo modelo: %r]" % nome)
+    return None, {}
+
+
 # ----------------------------------------------------------------- cronometro
 
 class Etapas:
@@ -240,14 +386,13 @@ class SeparadorDeFalas:
     Existe para a voz emendar no modelo em vez de esperar a resposta inteira.
     Numa resposta longa a espera custava 2,37s parados.
 
-    Tres responsabilidades, nesta ordem -- e a ordem importa:
+    Duas responsabilidades, nesta ordem -- e a ordem importa:
 
-    1. Segurar o comeco ate saber se a resposta e um [CONSULTAR:]. Se for,
-       nada e falado: quem responde e o caminho web. Sem essa trava o Jarvis
-       comecaria a ler a propria tag em voz alta.
-    2. Remover as tags do inicio ([COR:], [BRILHO:] e qualquer vazamento como
-       [TELA]). Elas sao dados de sistema, nao fala.
-    3. So entao cortar em frases e liberar.
+    1. Remover do inicio qualquer tag e qualquer vazamento do bloco de tela
+       ([TELA], [CURSOR]). Sao dados de sistema, nao fala. Falar antes de a
+       resposta acabar significa decidir isso antes de ver o texto inteiro,
+       entao o comeco fica retido ate dar para saber o que e.
+    2. So entao cortar em frases e liberar.
 
     A primeira frase e quebrada numa virgula se passar de `limite_primeira`
     caracteres: o custo dos motores de rede cresce com o tamanho do texto
@@ -270,7 +415,7 @@ class SeparadorDeFalas:
 
     def __init__(self, limite_primeira=70):
         self.buffer = ""
-        self.bloqueado = False      # virou [CONSULTAR:] -- nao fala nada
+        self.bloqueado = False      # reservado: nada pode sair
         self.descartando_linha = False
         self.primeira = True
         self.limite_primeira = limite_primeira
@@ -281,8 +426,7 @@ class SeparadorDeFalas:
         """O comeco ainda pode virar uma tag que muda tudo?
 
         Enquanto o buffer for so um '[' sem o ']' correspondente, nao da para
-        saber se e [COR: azul] (remover) ou [CONSULTAR: ...] (nao falar nada).
-        Na duvida, segura.
+        saber se e uma tag a remover ou texto de verdade. Na duvida, segura.
         """
         ini = self.buffer.lstrip()
         if not ini:
@@ -306,10 +450,6 @@ class SeparadorDeFalas:
             if not ini:
                 return False
             alto = ini.upper()
-
-            if alto.startswith("[CONSULTAR:"):
-                self.bloqueado = True
-                return True
 
             if any(alto.startswith(mk) for mk in self.MARCADORES_VAZAMENTO):
                 self.buffer = ini
@@ -695,30 +835,6 @@ class Ouvido:
                                          condition_on_previous_text=False)
         return " ".join(s.text for s in segs).strip()
 
-def consultar_gemini_web(pergunta, contexto_tela):
-    """Bate na interface Web do Gemini de forma invisivel usando a biblioteca g4f."""
-    try:
-        from g4f.client import Client
-        import g4f
-        
-        client = Client()
-        prompt = f"O usuário perguntou: '{pergunta}'. \nContexto da tela atual dele: \n{contexto_tela}\n\nResponda em NO MÁXIMO 1 ou 2 frases curtas, diretas e naturais para um assistente de voz chamado Jarvis. Sem formatação pesada (sem asteriscos, negrito ou listas), apenas texto direto, conciso e fácil de falar."
-        
-        print("  (Acessando o site do Gemini invisivelmente...)")
-        response = client.chat.completions.create(
-            model="gemini",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        texto = response.choices[0].message.content
-        
-        # Limpa asteriscos e formatações pesadas para a voz ficar natural
-        return texto.replace("*", "").replace("#", "").strip()
-    except ImportError:
-        return "Erro: A biblioteca g4f não está instalada. Cancele e instale com pip install g4f."
-    except Exception as e:
-        print(f"Erro na navegação web: {e}")
-        return "Desculpe, a página do Gemini barrou minha conexão agora."
-
 # --------------------------------------------------------------------- cerebro
 
 def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None,
@@ -740,14 +856,21 @@ def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None,
        carregar o peso de todas as telas anteriores para sempre.
     2. O historico e cortado nas ultimas MAX_TURNOS_HISTORICO trocas.
     """
+    # A PERGUNTA VEM PRIMEIRO, o bloco de tela depois. Nao e cosmetico:
+    # com a pergunta enterrada embaixo do muro de dados, o modelo deixava de
+    # chamar as ferramentas -- medido, 6 de 8 casos contra 8 de 8 nesta ordem.
+    # E a mesma armadilha que o LEIA-ME ja registrava: o bloco [TELA] muda o
+    # comportamento do modelo muito alem de "dar contexto".
     if contexto_tela:
-        conteudo = ("[DADOS DO SISTEMA - APENAS PARA CONSULTA SILENCIOSA]:\n"
-                    + contexto_tela + "\n\n" + pergunta)
+        conteudo = (pergunta + "\n\n"
+                    + "[DADOS DO SISTEMA - APENAS PARA CONSULTA SILENCIOSA]:\n"
+                    + contexto_tela)
     else:
         conteudo = pergunta
 
     anteriores = list(historico or [])[-(MAX_TURNOS_HISTORICO * 2):]
-    mensagens = ([{"role": "system", "content": SISTEMA}]
+    sistema = SISTEMA if USAR_FERRAMENTAS else SISTEMA_LEGADO
+    mensagens = ([{"role": "system", "content": sistema}]
                  + anteriores
                  + [{"role": "user", "content": conteudo}])
 
@@ -759,10 +882,13 @@ def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None,
         "options": {"num_predict": 100, "temperature": 0.3, "num_ctx": NUM_CTX},
     }
 
+    if USAR_FERRAMENTAS:
+        corpo["tools"] = FERRAMENTAS_LLM
+
     req = urllib.request.Request(OLLAMA + "/api/chat",
                                  data=json.dumps(corpo).encode(), method="POST",
                                  headers={"Content-Type": "application/json"})
-    partes = []
+    partes, chamadas = [], []
     primeiro = True
     separador = SeparadorDeFalas() if ao_frase_pronta else None
 
@@ -771,7 +897,10 @@ def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None,
             if not linha.strip():
                 continue
             d = json.loads(linha)
-            pedaco = (d.get("message") or {}).get("content")
+            msg = d.get("message") or {}
+            if msg.get("tool_calls"):
+                chamadas.extend(msg["tool_calls"])
+            pedaco = msg.get("content")
             if pedaco:
                 if primeiro:
                     primeiro = False
@@ -788,12 +917,17 @@ def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None,
 
     resposta = "".join(partes).strip()
 
+    # Turno de ferramenta nao entra no historico: quem responde e a ferramenta,
+    # nao o modelo, e guardar isso so gastaria prefill nos turnos seguintes.
+    if chamadas:
+        return resposta, anteriores, chamadas
+
     # O historico guarda a pergunta LIMPA, sem o bloco de tela.
     novo_historico = anteriores + [
         {"role": "user", "content": pergunta},
         {"role": "assistant", "content": resposta},
     ]
-    return resposta, novo_historico[-(MAX_TURNOS_HISTORICO * 2):]
+    return resposta, novo_historico[-(MAX_TURNOS_HISTORICO * 2):], chamadas
 
 
 def preaquecer():
@@ -808,7 +942,8 @@ def preaquecer():
     """
     corpo = {
         "model": MODELO_LLM,
-        "messages": [{"role": "system", "content": SISTEMA},
+        "messages": [{"role": "system",
+                      "content": SISTEMA if USAR_FERRAMENTAS else SISTEMA_LEGADO},
                      {"role": "user", "content": "oi"}],
         "stream": False, "think": False,
         "keep_alive": -1,   # nunca descarrega
@@ -935,8 +1070,10 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
         hud_bridge.notificar(state="idle")
         return historico
 
-    # --- Interceptor de Comandos de Interface (Cores e Brilho da HUD) ---
-    cmd_interface = processar_comando_interface(texto)
+    # --- Interceptores por substring: SO no modo de rollback ---
+    # Com USAR_FERRAMENTAS o modelo decide por intencao, e estes dois
+    # ficam desligados. Continuam aqui para a flag poder voltar atras.
+    cmd_interface = processar_comando_interface(texto) if not USAR_FERRAMENTAS else None
     if cmd_interface:
         msg_resposta, dados_hud = cmd_interface
         print(f"  [INTERFACE] Comando de HUD detectado: {dados_hud}")
@@ -948,8 +1085,7 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
         hud_bridge.notificar(state="idle")
         return historico
 
-    # --- Módulos Especializados em Tempo Real (Cotações & Clima) ---
-    res_ferramenta = ferramentas.processar_ferramenta(texto)
+    res_ferramenta = ferramentas.processar_ferramenta(texto) if not USAR_FERRAMENTAS else None
     if res_ferramenta:
         print(f"  [FERRAMENTA EM TEMPO REAL]: {res_ferramenta}")
         e.marca("2. Ferramenta Especializada (AwesomeAPI / Open-Meteo)")
@@ -987,14 +1123,44 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
         hud_bridge.notificar(state="speaking", jarvisSpeech=f)
         fluxo.dizer(f)
 
-    resposta, novo_hist = pensar(texto, contexto_tela, historico,
-                                 ao_primeiro_token=lambda: e.marca("3. qwen3 (1o token)"),
-                                 ao_frase_pronta=_frase if fluxo else None)
+    resposta, novo_hist, chamadas = pensar(
+        texto, contexto_tela, historico,
+        ao_primeiro_token=lambda: e.marca("3. qwen3 (1o token)"),
+        ao_frase_pronta=_frase if fluxo else None)
     e.marca("4. qwen3 (resposta completa)")
+
+    # --- Turno de ferramenta ---
+    # O modelo devolve tool_calls e NENHUM texto, entao nada foi streamado.
+    # Executamos e falamos o resultado direto, sem uma segunda ida ao modelo
+    # para redigir: ferramentas.py ja devolve frase pronta e as respostas de
+    # cor e brilho ja existem em PALETAS_MAPA. Isso segura o custo do turno em
+    # ~0,9s em vez de ~1,7s.
+    if chamadas:
+        if fluxo:
+            fluxo.finalizar()
+            fluxo = None
+        falas, dados_hud = [], {}
+        for chamada in chamadas:
+            fn = chamada.get("function") or {}
+            texto_fer, dados = executar_ferramenta(fn.get("name"), fn.get("arguments"))
+            print("  [FERRAMENTA] %s(%s) -> %r"
+                  % (fn.get("name"), fn.get("arguments"), (texto_fer or "")[:60]))
+            if texto_fer:
+                falas.append(texto_fer)
+            dados_hud.update(dados)
+        resposta = " ".join(falas).strip() or "Feito, senhor."
+        e.marca("5. ferramenta executada")
+        hud_bridge.notificar(state="speaking", jarvisSpeech=resposta, **dados_hud)
+        voz.falar(resposta, ao_primeiro=lambda: e.marca("6. Voz (1o audio) <- FALA"))
+        e.relatorio()
+        hud_bridge.notificar(state="idle", benchmarks=e.resumo())
+        return novo_hist
     
-    # --- Processamento de Ações Emitidas pelo Qwen3 (Cores e Brilho) ---
+    # --- Tags emitidas pelo modelo: SO no modo de rollback ---
+    # Com USAR_FERRAMENTAS o prompt nao pede tag nenhuma; cor e brilho vem
+    # como tool_calls e ja foram tratados acima.
     dados_hud_acao = {}
-    if "[COR:" in resposta:
+    if not USAR_FERRAMENTAS and "[COR:" in resposta:
         m_cor = re.search(r'\[COR:\s*([a-zA-ZáàâãéèêíïóôõöúçñÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇÑ]+)\]', resposta)
         if m_cor:
             cor_tag = m_cor.group(1).lower().strip()
@@ -1006,7 +1172,7 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
                 dados_hud_acao["theme"] = cor_tag
         resposta = re.sub(r'\[COR:[^\]]+\]', '', resposta).strip()
 
-    if "[BRILHO:" in resposta:
+    if not USAR_FERRAMENTAS and "[BRILHO:" in resposta:
         if "[BRILHO: +]" in resposta:
             BRILHO_HUD_ATUAL = min(2.0, round(BRILHO_HUD_ATUAL + 0.35, 2))
             dados_hud_acao["brightness"] = BRILHO_HUD_ATUAL
@@ -1024,57 +1190,33 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
     if not resposta.strip():
         resposta = "Comandos executados, senhor."
 
-    # --- Roteamento Web Invisível ---
-    if resposta.strip().startswith("[CONSULTAR:"):
-        # O separador ja tinha bloqueado a fala ao ver a tag; encerra o fluxo
-        # vazio para as threads nao ficarem penduradas.
-        if fluxo:
-            fluxo.finalizar()
-            fluxo = None
-        pergunta_nuvem = resposta.replace("[CONSULTAR:", "").replace("]", "").strip()
-        print(f"  [ROTEAMENTO] Qwen3 delegou para a Web. Pergunta: {pergunta_nuvem}")
-        hud_bridge.notificar(state="web", jarvisSpeech="Deixe-me pesquisar isso a fundo na web para você.")
-        
-        # Feedback rápido enquanto navega
-        voz.falar("Deixe-me pesquisar isso a fundo na web para você.")
-        e.marca("5. Voz (feedback rápido)")
-        
-        # Consulta à Web (g4f)
-        resposta = consultar_gemini_web(pergunta_nuvem, contexto_tela)
-        e.marca("6. Consulta Web concluída")
-        print("  Gemini (Web): %r" % resposta[:150])
-        
-        hud_bridge.notificar(state="speaking", jarvisSpeech=resposta, **dados_hud_acao)
-        voz.falar(resposta)
-        e.marca("7. Voz (resposta da Web) <- FALA")
-    else:
-        print("  Jarvis (Local): %r" % resposta[:150])
-        if dados_hud_acao:
-            hud_bridge.notificar(state="speaking", **dados_hud_acao)
-        if fluxo:
-            # As frases ja foram enfileiradas durante o streaming; aqui so
-            # esperamos a ultima terminar de tocar.
-            falado = fluxo.finalizar()
-            fluxo = None
-            if falado:
-                resposta = falado
-            else:
-                # O separador nao liberou nada (resposta so de tags, por
-                # exemplo). Cai no modo antigo para nao ficar mudo.
-                hud_bridge.notificar(state="speaking", jarvisSpeech=resposta)
-                voz.falar(resposta, ao_primeiro=lambda: e.marca("5. Voz (1o audio) <- FALA"))
+    print("  Jarvis (Local): %r" % resposta[:150])
+    if dados_hud_acao:
+        hud_bridge.notificar(state="speaking", **dados_hud_acao)
+    if fluxo:
+        # As frases ja foram enfileiradas durante o streaming; aqui so
+        # esperamos a ultima terminar de tocar.
+        falado = fluxo.finalizar()
+        fluxo = None
+        if falado:
+            resposta = falado
         else:
+            # O separador nao liberou nada (resposta so de tags, por
+            # exemplo). Cai no modo antigo para nao ficar mudo.
             hud_bridge.notificar(state="speaking", jarvisSpeech=resposta)
             voz.falar(resposta, ao_primeiro=lambda: e.marca("5. Voz (1o audio) <- FALA"))
-        e.marca("6. terminou de falar")
+    else:
+        hud_bridge.notificar(state="speaking", jarvisSpeech=resposta)
+        voz.falar(resposta, ao_primeiro=lambda: e.marca("5. Voz (1o audio) <- FALA"))
+    e.marca("6. terminou de falar")
 
     # O historico guarda o que o Jarvis FALOU, nao a saida crua do modelo.
     #
-    # Sem isto, uma tag de controle emitida uma vez ([CONSULTAR:], [COR:],
-    # [BRILHO:]) fica no historico como fala do assistente -- e o modelo passa
-    # a IMITAR a si mesmo. Medido: bastava um [CONSULTAR:] no turno 2 para
-    # todos os turnos seguintes virarem [CONSULTAR:], mandando para a web ate
-    # perguntas que ele responde sozinho ("capital da Franca").
+    # Sem isto, qualquer tag ou vazamento que escape uma vez fica no historico
+    # como fala do assistente -- e o modelo passa a IMITAR a si mesmo. Medido
+    # quando ainda havia a tag [CONSULTAR:]: bastava ela aparecer no turno 2
+    # para todos os turnos seguintes virarem [CONSULTAR:], mandando para a web
+    # ate perguntas que ele responde sozinho ("capital da Franca").
     if novo_hist and novo_hist[-1].get("role") == "assistant":
         novo_hist[-1]["content"] = resposta
 
