@@ -74,6 +74,7 @@ VOZ_TTS = BASE / "vozes" / "pt_BR-faber-medium.onnx"
 
 MODELO_LLM = "qwen3:8b"
 NUM_CTX = 8192            # PRECISA ser identico no preaquecimento e no uso
+MAX_TURNOS_HISTORICO = 3  # trocas (usuario+jarvis) que seguem no prompt
 MODELO_STT = "small"
 OLLAMA = "http://127.0.0.1:11434"
 
@@ -451,39 +452,68 @@ def consultar_gemini_web(pergunta, contexto_tela):
 # --------------------------------------------------------------------- cerebro
 
 def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None):
-    """qwen3 local. `think:false` e essencial: com o modo pensante ligado o
-    tempo ate a primeira palavra sobe de 0.4s para 3.1s."""
+    """qwen3 local, via /api/chat com historico explicito de mensagens.
+
+    `think:false` e essencial: com o modo pensante ligado o tempo ate a
+    primeira palavra sobe de 0,4s para 3,1s.
+
+    Por que /api/chat e nao /api/generate com `context`: passando `context`,
+    o Ollama reprocessa a conversa inteira a cada turno. Medido neste projeto:
+    0,78s no turno 1, 2,16s no turno 5, crescendo sem parar. Com `messages`
+    o custo estabiliza em ~1s.
+
+    Duas regras que impedem o historico de inchar:
+
+    1. O bloco [TELA] entra SO na mensagem do turno atual e nunca e guardado.
+       Ele muda a cada turno e e o que mais custa prefill -- guardar seria
+       carregar o peso de todas as telas anteriores para sempre.
+    2. O historico e cortado nas ultimas MAX_TURNOS_HISTORICO trocas.
+    """
     if contexto_tela:
-        prompt = f"[DADOS DO SISTEMA - APENAS PARA CONSULTA SILENCIOSA]:\n{contexto_tela}\n\n[USUÁRIO]: {pergunta}\n\n[JARVIS]:"
+        conteudo = ("[DADOS DO SISTEMA - APENAS PARA CONSULTA SILENCIOSA]:\n"
+                    + contexto_tela + "\n\n" + pergunta)
     else:
-        prompt = f"[USUÁRIO]: {pergunta}\n\n[JARVIS]:"
+        conteudo = pergunta
+
+    anteriores = list(historico or [])[-(MAX_TURNOS_HISTORICO * 2):]
+    mensagens = ([{"role": "system", "content": SISTEMA}]
+                 + anteriores
+                 + [{"role": "user", "content": conteudo}])
+
     corpo = {
-        "model": MODELO_LLM, "prompt": prompt, "system": SISTEMA,
+        "model": MODELO_LLM, "messages": mensagens,
         "stream": True, "think": False,
+        "keep_alive": -1,   # keep_alive vale POR REQUISICAO: sem ele aqui, o
+                            # preaquecimento perde efeito apos 5 min de ocio
         "options": {"num_predict": 100, "temperature": 0.3, "num_ctx": NUM_CTX},
     }
-    if historico:
-        corpo["context"] = historico
 
-    req = urllib.request.Request(OLLAMA + "/api/generate",
+    req = urllib.request.Request(OLLAMA + "/api/chat",
                                  data=json.dumps(corpo).encode(), method="POST",
                                  headers={"Content-Type": "application/json"})
-    partes, ctx = [], None
+    partes = []
     primeiro = True
     with urllib.request.urlopen(req, timeout=300) as r:
         for linha in r:
             if not linha.strip():
                 continue
             d = json.loads(linha)
-            if d.get("response"):
+            pedaco = (d.get("message") or {}).get("content")
+            if pedaco:
                 if primeiro:
                     primeiro = False
                     if ao_primeiro_token:
                         ao_primeiro_token()
-                partes.append(d["response"])
-            if d.get("done"):
-                ctx = d.get("context")
-    return "".join(partes).strip(), ctx
+                partes.append(pedaco)
+
+    resposta = "".join(partes).strip()
+
+    # O historico guarda a pergunta LIMPA, sem o bloco de tela.
+    novo_historico = anteriores + [
+        {"role": "user", "content": pergunta},
+        {"role": "assistant", "content": resposta},
+    ]
+    return resposta, novo_historico[-(MAX_TURNOS_HISTORICO * 2):]
 
 
 def preaquecer():
@@ -492,13 +522,19 @@ def preaquecer():
     Detalhe que custa 18 segundos se esquecido: o Ollama recarrega o modelo
     inteiro quando `num_ctx` muda entre chamadas. O preaquecimento precisa usar
     EXATAMENTE as mesmas opcoes do uso real, senao ele so aquece em vao.
+
+    Usa /api/chat com o MESMO prompt de sistema do uso real, para aquecer
+    tambem o cache do prefixo -- nao so o carregamento do modelo.
     """
     corpo = {
-        "model": MODELO_LLM, "prompt": "oi", "stream": False, "think": False,
+        "model": MODELO_LLM,
+        "messages": [{"role": "system", "content": SISTEMA},
+                     {"role": "user", "content": "oi"}],
+        "stream": False, "think": False,
         "keep_alive": -1,   # nunca descarrega
         "options": {"num_predict": 1, "num_ctx": NUM_CTX},
     }
-    req = urllib.request.Request(OLLAMA + "/api/generate",
+    req = urllib.request.Request(OLLAMA + "/api/chat",
                                  data=json.dumps(corpo).encode(), method="POST",
                                  headers={"Content-Type": "application/json"})
     t0 = time.perf_counter()
@@ -672,6 +708,16 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo=""):
         voz.falar(resposta, ao_primeiro=lambda: e.marca("5. Voz (1o audio) <- FALA"))
         e.marca("6. terminou de falar")
 
+    # O historico guarda o que o Jarvis FALOU, nao a saida crua do modelo.
+    #
+    # Sem isto, uma tag de controle emitida uma vez ([CONSULTAR:], [COR:],
+    # [BRILHO:]) fica no historico como fala do assistente -- e o modelo passa
+    # a IMITAR a si mesmo. Medido: bastava um [CONSULTAR:] no turno 2 para
+    # todos os turnos seguintes virarem [CONSULTAR:], mandando para a web ate
+    # perguntas que ele responde sozinho ("capital da Franca").
+    if novo_hist and novo_hist[-1].get("role") == "assistant":
+        novo_hist[-1]["content"] = resposta
+
     e.relatorio()
     hud_bridge.notificar(
         state="idle",
@@ -706,7 +752,7 @@ def main():
     print("  modelo pronto em %.1fs" % preaquecer())
     print()
 
-    historico = None
+    historico = []
     if simulado:
         FALAS = [
             "Bom dia! Tudo certo?",
