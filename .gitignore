@@ -1,0 +1,21 @@
+.venv/
+__pycache__/
+*.pyc
+
+# Segredos: chaves de API
+.env
+
+# Modelos e amostras (pesados, baixados sob demanda)
+vozes/*.onnx
+vozes/*.onnx.json
+vozes/kokoro/
+vozes/amostras/
+vozes/cache/
+
+*.bak
+
+# Perfil isolado do navegador da HUD (300+ arquivos, inclui cookies e historico)
+.hud_profile/
+
+# Copias de trabalho -- o historico do git substitui isso
+*.orig

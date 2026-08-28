@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>J.A.R.V.I.S. - Core</title>
+    <!-- Three.js CDN para o Cosmos Engine 3D -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <!-- Google Fonts: Inter, Rajdhani & Share Tech Mono -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=Rajdhani:wght@500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="style.css">
+</head>
+<body class="theme-harmonic-hud">
+    <!-- Fundo Cósmico Trillion (GLSL Shader Canvas) -->
+    <div class="cosmos-bg">
+        <div class="bg-ink"></div>
+        <div class="bg-dotgrid"></div>
+        <div class="bg-nebula"></div>
+    </div>
+
+    <!-- Barra de Janela Superior Minimalista -->
+    <div class="app-titlebar" id="app-titlebar">
+        <div class="title-left">
+            <span class="pulse-dot"></span>
+            <span class="brand-title">trillion // jarvis</span>
+        </div>
+        <div class="title-right">
+            <button class="win-btn sfx-btn" id="btn-sfx-toggle" title="Som">🔊</button>
+            <button class="win-btn" id="win-min" title="Minimizar">_</button>
+            <button class="win-btn win-close" id="win-close" title="Fechar">✕</button>
+        </div>
+    </div>
+
+    <!-- CANVAS 3D DO COSMOS ORB (Three.js WebGL) -->
+    <div id="canvas-container"></div>
+
+    <!-- OVERLAY HARMÔNICO E MINIMALISTA -->
+    <main class="hud-overlay">
+        
+        <!-- STATUS SUPERIOR MINIMALISTA -->
+        <header class="hud-top">
+            <div class="status-pill" id="status-pill">
+                <span class="status-symbol">◦</span>
+                <span class="status-text" id="status-label">Watching 6 systems · 24/7</span>
+            </div>
+        </header>
+
+        <!-- CAIXA DE DIÁLOGO HARMÔNICA E TRANSLÚCIDA -->
+        <div class="dialog-wrapper">
+            <div class="dialog-card" id="dialog-box">
+                <div class="dialog-speaker">
+                    <span class="speaker-tag" id="speech-role">J.A.R.V.I.S.</span>
+                    <span class="speaker-divider">//</span>
+                    <span class="meta-target" id="active-target-text">VS CODE</span>
+                </div>
+                <div class="dialog-body">
+                    <p class="dialog-text" id="speech-text">
+                        "Sistemas sincronizados, senhor. Monitorando código e tela em tempo real."
+                    </p>
+                </div>
+            </div>
+        </div>
+
+        <!-- RODAPÉ HARMÔNICO: STATUS DOS 6 SISTEMAS SATÉLITES -->
+        <footer class="hud-bottom">
+            <div class="systems-row">
+                <span class="sys-item"><i class="dot" style="background:#5eead4;"></i>Revenue</span>
+                <span class="sys-item"><i class="dot" style="background:#c4b5fd;"></i>Code</span>
+                <span class="sys-item"><i class="dot" style="background:#fbbf24;"></i>Customers</span>
+                <span class="sys-item"><i class="dot" style="background:#f472b6;"></i>Data</span>
+                <span class="sys-item"><i class="dot" style="background:#67e8f9;"></i>Comms</span>
+                <span class="sys-item"><i class="dot" style="background:#fb7185;"></i>Intel</span>
+            </div>
+        </footer>
+    </main>
+
+    <!-- Feixe de Plasma Laser para Transição de Sucção ao Orbe -->
+    <div id="plasma-beam-overlay"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>

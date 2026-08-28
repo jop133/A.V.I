@@ -1,0 +1,481 @@
+/* ==========================================================================
+   J.A.R.V.I.S. COSMOS HUD - DESIGN HARMÔNICO & MINIMALISTA
+   ========================================================================== */
+
+:root {
+    --accent-teal: #5eead4;
+    --accent-teal-glow: rgba(94, 234, 212, 0.35);
+    --accent-violet: #c4b5fd;
+
+    --glass-surface: rgba(6, 9, 20, 0.55);
+    --glass-border: rgba(255, 255, 255, 0.09);
+    --glass-glow: 0 16px 40px rgba(0, 0, 0, 0.6);
+
+    --font-sans: 'Inter', -apple-system, sans-serif;
+    --font-heading: 'Rajdhani', sans-serif;
+    --font-mono: 'Share Tech Mono', monospace;
+
+    --transition: 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+    user-select: none;
+}
+
+body {
+    background-color: #030307;
+    color: #ffffff;
+    font-family: var(--font-sans);
+    overflow: hidden;
+    width: 100vw;
+    height: 100vh;
+}
+
+/* --------------------------------------------------------------------------
+   Fundo Atmosférico
+   -------------------------------------------------------------------------- */
+.cosmos-bg {
+    position: fixed;
+    inset: 0;
+    pointer-events: none;
+    z-index: 1;
+}
+
+.bg-ink {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at center, #060a16 0%, #030307 100%);
+}
+
+.bg-dotgrid {
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(circle, rgba(255, 255, 255, 0.09) 1px, transparent 1px);
+    background-size: 28px 28px;
+    opacity: 0.5;
+}
+
+.bg-nebula {
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at 50% 45%, rgba(94, 234, 212, 0.12) 0%, rgba(139, 92, 246, 0.08) 40%, transparent 70%);
+    filter: blur(40px);
+}
+
+/* --------------------------------------------------------------------------
+   Canvas 3D WebGL (Three.js)
+   -------------------------------------------------------------------------- */
+#canvas-container {
+    position: fixed;
+    inset: 0;
+    width: 100vw;
+    height: 100vh;
+    z-index: 2;
+    pointer-events: auto;
+}
+
+/* --------------------------------------------------------------------------
+   Barra de Janela Superior Minimalista
+   -------------------------------------------------------------------------- */
+.app-titlebar {
+    position: fixed;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 32px;
+    background: rgba(3, 3, 7, 0.7);
+    backdrop-filter: blur(16px);
+    border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0 16px;
+    z-index: 1000;
+    -webkit-app-region: drag;
+}
+
+.title-left {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.pulse-dot {
+    width: 6px;
+    height: 6px;
+    border-radius: 50%;
+    background-color: var(--accent-teal);
+    box-shadow: 0 0 8px var(--accent-teal);
+    animation: pulse-dot-anim 2s infinite ease-in-out;
+}
+
+.brand-title {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: rgba(255, 255, 255, 0.75);
+}
+
+.title-right {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    -webkit-app-region: no-drag;
+}
+
+.win-btn {
+    background: transparent;
+    border: none;
+    color: rgba(255, 255, 255, 0.6);
+    width: 28px;
+    height: 24px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    cursor: pointer;
+    border-radius: 4px;
+    transition: var(--transition);
+}
+
+.win-btn:hover {
+    background: rgba(255, 255, 255, 0.1);
+    color: #ffffff;
+}
+
+.win-btn.win-close:hover {
+    background: #e11d48;
+    color: #ffffff;
+}
+
+.sfx-btn {
+    font-size: 11px;
+    margin-right: 4px;
+}
+
+.sfx-btn.muted {
+    opacity: 0.4;
+}
+
+/* --------------------------------------------------------------------------
+   Overlay e Elementos da HUD
+   -------------------------------------------------------------------------- */
+.hud-overlay {
+    position: fixed;
+    inset: 0;
+    z-index: 10;
+    pointer-events: none;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    padding: 48px 32px 32px 32px;
+}
+
+.hud-top {
+    display: flex;
+    justify-content: center;
+}
+
+.status-pill {
+    background: var(--glass-surface);
+    border: 1px solid var(--glass-border);
+    backdrop-filter: blur(20px);
+    padding: 6px 16px;
+    border-radius: 20px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    box-shadow: var(--glass-glow);
+    transition: var(--transition);
+}
+
+.status-symbol {
+    color: var(--accent-teal);
+    font-size: 14px;
+    animation: pulse-dot-anim 1.5s infinite ease-in-out;
+}
+
+.status-text {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 1px;
+    color: rgba(255, 255, 255, 0.85);
+    text-transform: uppercase;
+}
+
+/* --------------------------------------------------------------------------
+   Caixa de Diálogo Central-Inferior
+   -------------------------------------------------------------------------- */
+.dialog-wrapper {
+    position: fixed;
+    bottom: 96px;
+    left: 50%;
+    transform: translateX(-50%);
+    width: min(680px, 90vw);
+    pointer-events: auto;
+}
+
+.dialog-card {
+    background: var(--glass-surface);
+    border: 1px solid var(--glass-border);
+    backdrop-filter: blur(24px);
+    border-radius: 16px;
+    padding: 18px 24px;
+    box-shadow: var(--glass-glow);
+    transition: var(--transition);
+}
+
+.dialog-speaker {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-family: var(--font-mono);
+    font-size: 11px;
+    letter-spacing: 1px;
+}
+
+.speaker-tag {
+    color: var(--accent-teal);
+    font-weight: 600;
+}
+
+.speaker-divider {
+    color: rgba(255, 255, 255, 0.2);
+}
+
+.meta-target {
+    color: rgba(255, 255, 255, 0.5);
+    font-size: 10px;
+}
+
+.dialog-text {
+    font-size: 14px;
+    line-height: 1.5;
+    color: rgba(255, 255, 255, 0.95);
+    min-height: 22px;
+}
+
+/* --------------------------------------------------------------------------
+   Rodapé com Status de Sistemas
+   -------------------------------------------------------------------------- */
+.hud-bottom {
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    gap: 14px;
+    pointer-events: auto;
+}
+
+.systems-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: center;
+    gap: 14px;
+    font-family: var(--font-mono);
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 1.2px;
+    color: rgba(255, 255, 255, 0.4);
+}
+
+.sys-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+}
+
+.sys-item .dot {
+    display: inline-block;
+    width: 4.5px;
+    height: 4.5px;
+    border-radius: 50%;
+    box-shadow: 0 0 5px currentColor;
+}
+
+/* --------------------------------------------------------------------------
+   Animações
+   -------------------------------------------------------------------------- */
+@keyframes pulse-dot-anim {
+    0%, 100% { transform: scale(1); opacity: 1; }
+    50% { transform: scale(0.7); opacity: 0.35; }
+}
+
+/* ==========================================================================
+   ANIMAÇÃO: A HUD COMPLETA VIRA UM FEIXE DE LUZ E É SUGADA PARA O TOPO
+   ========================================================================== */
+body.beaming-to-orb {
+    pointer-events: none;
+    overflow: hidden;
+}
+
+/* Toda a interface colapsa lateralmente em um feixe laser central e sobe para o topo */
+body.beaming-to-orb .cosmos-bg,
+body.beaming-to-orb .hud-overlay,
+body.beaming-to-orb .app-titlebar,
+body.beaming-to-orb #canvas-container {
+    transform-origin: 50% 50%;
+    animation: collapseToBeamAndShoot 0.85s cubic-bezier(0.7, 0, 0.2, 1) forwards;
+}
+
+@keyframes collapseToBeamAndShoot {
+    0% {
+        transform: scaleX(1) scaleY(1) translateY(0);
+        filter: blur(0px) brightness(1);
+        opacity: 1;
+    }
+    32% {
+        /* Colapso total horizontal em uma lâmina de plasma central */
+        transform: scaleX(0.003) scaleY(1.02) translateY(0);
+        filter: blur(1.5px) brightness(7) drop-shadow(0 0 30px #00F0FF);
+        opacity: 1;
+    }
+    65% {
+        /* O feixe se contrai e é sugado para cima em alta velocidade */
+        transform: scaleX(0.006) scaleY(0.20) translateY(-44vh);
+        filter: blur(4px) brightness(12) drop-shadow(0 0 45px #5EEAD4);
+        opacity: 0.95;
+    }
+    85% {
+        /* Atinge o ponto do topo do monitor onde o orbe é criado */
+        transform: scaleX(0.015) scaleY(0.04) translateY(-48vh);
+        filter: blur(10px) brightness(18) drop-shadow(0 0 60px #FFFFFF);
+        opacity: 0.7;
+    }
+    100% {
+        /* Absorção total no ponto da singularidade */
+        transform: scaleX(0.001) scaleY(0.001) translateY(-50vh);
+        filter: blur(20px) brightness(25);
+        opacity: 0;
+    }
+}
+
+/* Faixa de laser de plasma central ultra-brilhante */
+#plasma-beam-overlay {
+    position: fixed;
+    top: 0;
+    bottom: 0;
+    left: 50%;
+    width: 6px;
+    transform: translateX(-50%) scaleY(0);
+    background: linear-gradient(to bottom, #FFFFFF 0%, #5EEAD4 25%, #00F0FF 75%, #FFFFFF 100%);
+    box-shadow: 0 0 25px 6px #00F0FF, 0 0 60px 18px rgba(94, 234, 212, 0.85);
+    z-index: 99999;
+    pointer-events: none;
+    opacity: 0;
+    border-radius: 4px;
+}
+
+body.beaming-to-orb #plasma-beam-overlay {
+    animation: laserBeamStreak 0.85s cubic-bezier(0.7, 0, 0.2, 1) forwards;
+}
+
+@keyframes laserBeamStreak {
+    0% {
+        transform: translateX(-50%) scaleY(0) translateY(0);
+        opacity: 0;
+    }
+    28% {
+        transform: translateX(-50%) scaleY(1) translateY(0);
+        opacity: 1;
+    }
+    65% {
+        transform: translateX(-50%) scaleY(0.22) translateY(-44vh);
+        opacity: 1;
+    }
+    85% {
+        transform: translateX(-50%) scaleY(0.05) translateY(-48vh);
+        opacity: 0.85;
+    }
+    100% {
+        transform: translateX(-50%) scaleY(0.001) translateY(-50vh);
+        opacity: 0;
+    }
+}
+
+/* ==========================================================================
+   ANIMAÇÃO: DESDOBRAMENTO HOLOGRÁFICO DAS BORDAS PARA A HUD COMPLETA
+   ========================================================================== */
+body.expanding-from-edges .hud-overlay,
+body.expanding-from-edges .app-titlebar {
+    animation: unfoldFromPerimeter 0.75s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes unfoldFromPerimeter {
+    0% {
+        opacity: 0;
+        transform: scale(0.92);
+        filter: blur(12px) brightness(3);
+    }
+    50% {
+        opacity: 0.85;
+        transform: scale(0.98);
+        filter: blur(3px) brightness(1.6);
+    }
+    100% {
+        opacity: 1;
+        transform: scale(1);
+        filter: blur(0px) brightness(1);
+    }
+}
+
+/* ==========================================================================
+   ANIMAÇÃO: DISSOLUÇÃO EXPANSIVA DA HUD COMPLETA PARA AS 4 BORDAS
+   ========================================================================== */
+body.dissolving-to-edges .hud-overlay,
+body.dissolving-to-edges .app-titlebar,
+body.dissolving-to-edges .cosmos-bg,
+body.dissolving-to-edges #canvas-container {
+    animation: outwardDissolutionToEdges 0.45s cubic-bezier(0.7, 0, 0.3, 1) forwards;
+}
+
+@keyframes outwardDissolutionToEdges {
+    0% {
+        opacity: 1;
+        transform: scale(1);
+        filter: blur(0px) brightness(1);
+    }
+    40% {
+        opacity: 0.9;
+        transform: scale(1.03);
+        filter: blur(4px) brightness(2.2);
+    }
+    100% {
+        opacity: 0;
+        transform: scale(1.08);
+        filter: blur(16px) brightness(4);
+    }
+}
+
+/* ==========================================================================
+   ANIMAÇÃO: DESDOBRAMENTO HOLOGRÁFICO A PARTIR DO FEIXE VERTICAL DO ORBE
+   ========================================================================== */
+body.expanding-from-beam .hud-overlay,
+body.expanding-from-beam .app-titlebar,
+body.expanding-from-beam .cosmos-bg,
+body.expanding-from-beam #canvas-container {
+    transform-origin: 50% 0%;
+    animation: expandFromVerticalBeam 0.70s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+}
+
+@keyframes expandFromVerticalBeam {
+    0% {
+        transform: scaleX(0.005) scaleY(1);
+        filter: blur(12px) brightness(6) drop-shadow(0 0 40px #00F0FF);
+        opacity: 1;
+    }
+    38% {
+        transform: scaleX(0.45) scaleY(1);
+        filter: blur(4px) brightness(2.2);
+        opacity: 0.95;
+    }
+    100% {
+        transform: scaleX(1) scaleY(1);
+        filter: blur(0px) brightness(1);
+        opacity: 1;
+    }
+}

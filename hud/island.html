@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <title>JARVIS_DYNAMIC_ISLAND</title>
+    <!-- Three.js CDN -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <link rel="stylesheet" href="island.css">
+</head>
+<body>
+    <div class="island-container" id="island-drag">
+        <!-- Esfera 3D do Cérebro do Jarvis -->
+        <div class="orb-box">
+            <div id="orb-canvas-container"></div>
+            <div class="orb-halo"></div>
+        </div>
+
+        <!-- Informações de Identidade & Status -->
+        <div class="brand-box">
+            <span class="brand-name">J.A.R.V.I.S.</span>
+            <span class="brand-status" id="island-status">ONLINE</span>
+        </div>
+
+        <!-- Visualizador de Ondas Sonoras / Espectro em Tempo Real -->
+        <div class="wave-box">
+            <canvas id="wave-canvas" width="220" height="32"></canvas>
+            <div class="speech-preview" id="island-speech"></div>
+        </div>
+
+        <!-- Botões de Controle Minimalistas -->
+        <div class="actions-box">
+            <div class="state-pill" id="action-state-pill">STANDBY</div>
+            <button class="icon-btn" id="btn-close-island" title="Fechar">✕</button>
+        </div>
+    </div>
+
+    <script src="island.js"></script>
+</body>
+</html>
