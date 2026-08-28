@@ -299,7 +299,11 @@ def executar_ferramenta(nome, argumentos):
         if modo not in destinos:
             return "Nao conheco esse modo de interface, senhor.", {}
         alvo, resposta = destinos[modo]
-        hud_bridge.alternar_interface(alvo)
+        if not hud_bridge.alternar_interface(alvo):
+            # Pedir o modo em que ja se esta fazia um ciclo inteiro de matar e
+            # relancar: a interface sumia e voltava ~2,5s depois, que e a cara
+            # exata de "nao trocou".
+            return "Ja estamos no modo %s, senhor." % modo, {}
         return resposta, {}
 
     if nome == "obter_cotacao":
@@ -960,6 +964,109 @@ def preaquecer():
 
 # ---------------------------------------------------------------- microfone
 
+# ------------------------------------------------------------------ microfone
+
+# Esta maquina tem 15 dispositivos de entrada, entre eles dois cabos virtuais
+# (VB-Audio) e um celular usado como webcam (Iriun) que aparece e some. Sem
+# fixar nada, o Jarvis abre o que o Windows disser ser o padrao NAQUELE
+# instante -- e se o padrao virar um cabo virtual, ele escuta silencio
+# absoluto. O sintoma e "as vezes ele nao capta minha voz; fecho e abro e
+# volta ao normal", porque reabrir pega o padrao daquele momento.
+#
+# MICROFONE no .env aceita o indice ou um trecho do nome. Vazio = padrao do
+# sistema, que e o comportamento antigo.
+DISPOSITIVO_MIC = None          # resolvido uma vez no boot
+
+# Quantos turnos seguidos em silencio digital antes de desconfiar do
+# dispositivo. Seis turnos sao ~30s sem NADA -- nem ruido de sala.
+TURNOS_MUDOS_PARA_AVISAR = 6
+RMS_SILENCIO_DIGITAL = 3.0
+_turnos_mudos = 0
+
+
+def _listar_entradas():
+    saida = []
+    try:
+        for i, d in enumerate(sd.query_devices()):
+            if d.get("max_input_channels", 0) > 0:
+                saida.append((i, d["name"]))
+    except Exception:
+        pass
+    return saida
+
+
+def resolver_microfone():
+    """Indice do dispositivo de entrada a usar, ou None para o padrao."""
+    alvo = (os.getenv("MICROFONE") or "").strip()
+    if not alvo:
+        return None
+
+    if alvo.isdigit():
+        return int(alvo)
+
+    for indice, nome in _listar_entradas():
+        if alvo.lower() in nome.lower():
+            return indice
+
+    print("  [Microfone] Nada casa com %r. Entradas disponiveis:" % alvo)
+    for indice, nome in _listar_entradas():
+        print("      [%d] %s" % (indice, nome))
+    print("  [Microfone] Usando o padrao do sistema.")
+    return None
+
+
+def anunciar_microfone():
+    """Diz no boot QUAL dispositivo foi aberto.
+
+    Existe para que, se o audio sumir de novo, a resposta esteja na tela em
+    vez de virar adivinhacao.
+    """
+    global DISPOSITIVO_MIC
+    DISPOSITIVO_MIC = resolver_microfone()
+    try:
+        d = sd.query_devices(DISPOSITIVO_MIC if DISPOSITIVO_MIC is not None
+                             else sd.default.device[0])
+        origem = "fixado no .env" if DISPOSITIVO_MIC is not None else "padrao do sistema"
+        print("  microfone: %s  (%s)" % (d["name"], origem))
+    except Exception as e:
+        print("  microfone: nao consegui identificar (%s)" % e)
+
+
+def _vigiar_silencio(pico_rms):
+    """Avisa quando varios turnos seguidos vem em silencio digital.
+
+    Silencio digital nao e sala quieta: e sinal ZERO, a assinatura de estar
+    lendo um cabo virtual ou um dispositivo desconectado.
+    """
+    global _turnos_mudos
+    if pico_rms > RMS_SILENCIO_DIGITAL:
+        _turnos_mudos = 0
+        return
+
+    _turnos_mudos += 1
+    if _turnos_mudos != TURNOS_MUDOS_PARA_AVISAR:
+        return
+
+    print()
+    print("  " + "!" * 58)
+    print("  [Microfone] %d turnos seguidos sem sinal nenhum (pico RMS %.1f)."
+          % (_turnos_mudos, pico_rms))
+    print("  Isto nao e sala silenciosa -- e sinal zero. O dispositivo aberto")
+    print("  provavelmente nao e o seu microfone.")
+    try:
+        d = sd.query_devices(DISPOSITIVO_MIC if DISPOSITIVO_MIC is not None
+                             else sd.default.device[0])
+        print("  Aberto agora: %s" % d["name"])
+    except Exception:
+        pass
+    print("  Entradas disponiveis:")
+    for indice, nome in _listar_entradas():
+        print("      [%d] %s" % (indice, nome))
+    print("  Ponha MICROFONE=<numero ou parte do nome> no .env e reinicie.")
+    print("  " + "!" * 58)
+    print()
+
+
 def duracao_segundos(pcm, taxa=TAXA_MIC):
     """Duracao real de um bloco de PCM 16 bits mono, em segundos.
 
@@ -1012,8 +1119,10 @@ def escutar(ouvido, limite=25.0):
     blocos, falou, ultimo_som = [], False, time.time()
     adiantada = None          # ((thread, saida), marca de ultimo_som no disparo)
 
+    pico_rms = 0.0
     with sd.RawInputStream(samplerate=TAXA_MIC, channels=1, dtype="int16",
-                           blocksize=BLOCO, callback=cb):
+                           blocksize=BLOCO, callback=cb,
+                           device=DISPOSITIVO_MIC):
         inicio = time.time()
         print("  (ouvindo microfone...)")
         hud_bridge.notificar(state="listening")
@@ -1024,6 +1133,7 @@ def escutar(ouvido, limite=25.0):
                 continue
             rms = float(np.sqrt(np.mean(
                 np.frombuffer(b, dtype=np.int16).astype(np.float32) ** 2)))
+            pico_rms = max(pico_rms, rms)
             if rms > VAD_LIMIAR:
                 falou = True
                 ultimo_som = time.time()
@@ -1039,6 +1149,8 @@ def escutar(ouvido, limite=25.0):
             else:
                 if time.time() - inicio > 5.0:
                     break
+
+    _vigiar_silencio(pico_rms)
 
     pcm = b"".join(blocos)
     texto = None
@@ -1119,8 +1231,14 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
     if VOZ_STREAMING:
         fluxo = FluxoDeFala(voz, ao_primeiro_audio=lambda: e.marca("5. Voz (1o audio) <- FALA"))
 
+    # A HUD recebe o texto ACUMULADO, nao a frase solta: mandando frase a
+    # frase ela ficaria trocando de legenda a cada uma, em vez de mostrar a
+    # resposta crescendo.
+    faladas_hud = []
+
     def _frase(f):
-        hud_bridge.notificar(state="speaking", jarvisSpeech=f)
+        faladas_hud.append(f)
+        hud_bridge.notificar(state="speaking", jarvisSpeech=" ".join(faladas_hud))
         fluxo.dizer(f)
 
     resposta, novo_hist, chamadas = pensar(
@@ -1241,6 +1359,7 @@ def main():
     print("=" * 60)
 
     t0 = time.perf_counter()
+    anunciar_microfone()
     voz = Voz()
     ouvido = Ouvido()
     percepcao.contexto()          # aquece a arvore de acessibilidade

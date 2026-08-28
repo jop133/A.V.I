@@ -216,6 +216,38 @@ def fechar_interfaces_anteriores():
         pass
 
 
+TITULO_ESPERADO = {
+    "orbe": "JARVIS_NATIVE_ORB",
+    "bordas": "JARVIS_AMBIENT_EDGES",
+    "completo": "J.A.R.V.I.S",
+}
+
+
+def _janela_existe(fragmento):
+    """Alguma janela VISIVEL tem esse trecho no titulo?"""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        WNDENUMPROC = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_int, ctypes.c_int)
+        achou = [False]
+
+        def cb(hwnd, _extra):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n > 0:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                if fragmento in buf.value:
+                    achou[0] = True
+            return True
+
+        user32.EnumWindows(WNDENUMPROC(cb), 0)
+        return achou[0]
+    except Exception:
+        return True          # na duvida, nao acusa falso positivo
+
+
 def _matar_edge_do_perfil():
     """Mata SOMENTE os Edge que estao usando o perfil da HUD.
 
@@ -231,15 +263,39 @@ def _matar_edge_do_perfil():
     passa a falhar sem dizer nada. Medido: 2o lancamento devolve rc=0.
     """
     alvo = str(PERFIL_HUD).replace("'", "''")
-    comando = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
-               "Where-Object { $_.CommandLine -like '*" + alvo + "*' } | "
-               "ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
-               "-ErrorAction SilentlyContinue }")
-    try:
-        subprocess.run(["powershell", "-NoProfile", "-NonInteractive", "-Command", comando],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
-    except Exception as e:
-        print(f"  [Interface] nao consegui limpar o Edge do perfil: {e}")
+    filtro = ("Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" | "
+              "Where-Object { $_.CommandLine -like '*" + alvo + "*' }")
+
+    def _ps(comando, saida=False):
+        try:
+            r = subprocess.run(
+                ["powershell", "-NoProfile", "-NonInteractive", "-Command", comando],
+                stdout=subprocess.PIPE if saida else subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL, timeout=10)
+            return (r.stdout or b"").decode("utf-8", "replace").strip()
+        except Exception as e:
+            print(f"  [Interface] powershell falhou: {e}")
+            return ""
+
+    _ps(filtro + " | ForEach-Object { Stop-Process -Id $_.ProcessId -Force "
+                 "-ErrorAction SilentlyContinue }")
+
+    # ESPERAR os processos sumirem de verdade antes de relancar.
+    #
+    # Matar e relancar em seguida nao funciona: o mutex de instancia unica do
+    # Chromium ainda nao foi liberado pelo processo morrendo, o Edge novo acha
+    # que ja existe outra instancia no perfil, ENTREGA a linha de comando para
+    # ela e sai com codigo 0 -- sem abrir janela nenhuma. Foi exatamente o que
+    # as medicoes mostraram: hud_app.py direto do terminal ficava vivo, e pelo
+    # bridge (que mata logo antes) morria na hora.
+    prazo = time.time() + 4.0
+    while time.time() < prazo:
+        restantes = _ps(filtro + " | Measure-Object | "
+                                 "Select-Object -ExpandProperty Count", saida=True)
+        if restantes in ("", "0"):
+            break
+        time.sleep(0.25)
+    time.sleep(0.4)          # folga para o mutex ser liberado
 
 
 def _ultimas_linhas_do_log(n=6):
@@ -253,8 +309,9 @@ def _ultimas_linhas_do_log(n=6):
 
 
 def _executar_alternancia(modo):
-    global PROCESSO_INTERFACE_ATUAL
+    global PROCESSO_INTERFACE_ATUAL, MODO_ATUAL
     with LOCK_PROC:
+        MODO_ATUAL = CANONICO.get((modo or "").lower().strip(), "completo")
         # Se estiver alternando para o Orbe, aciona primeiro a animação de sucção/feixe na HUD
         if modo in ["orbe", "esfera", "compacto"]:
             notificar(action="transition_to_orb")
@@ -304,22 +361,99 @@ def _executar_alternancia(modo):
                 print(f"  [Interface] Erro ao alternar para {modo}: {e}")
                 return
 
-            # Confere se a interface sobreviveu. Antes, um processo que morria
-            # ao nascer passava por sucesso e o Jarvis dizia "ativado" para
-            # uma janela que nunca abriu.
-            time.sleep(1.5)
-            if PROCESSO_INTERFACE_ATUAL.poll() is not None:
-                print(f"  [Interface] AVISO: {script.name} encerrou logo apos abrir "
-                      f"(codigo {PROCESSO_INTERFACE_ATUAL.returncode}). "
-                      f"A janela provavelmente NAO abriu. Ultimas linhas de "
-                      f"{LOG_INTERFACE.name}:")
+            # Confere se a JANELA apareceu -- nao so se o processo sobreviveu.
+            # O processo pode ficar vivo desenhando nada, que foi exatamente o
+            # bug das bordas nascendo em modo de saida. Conferir so o processo
+            # dava sucesso para uma tela vazia.
+            alvo_titulo = TITULO_ESPERADO.get(MODO_ATUAL)
+            prazo = time.time() + 5.0
+            apareceu, morreu = False, False
+            while time.time() < prazo:
+                time.sleep(0.25)
+                if PROCESSO_INTERFACE_ATUAL.poll() is not None:
+                    morreu = True
+                    break
+                if not alvo_titulo or _janela_existe(alvo_titulo):
+                    apareceu = True
+                    break
+                if _MODO_DESEJADO is not None:
+                    return          # chegou pedido novo: nao vale mais esperar
+
+            if morreu or not apareceu:
+                motivo = ("o processo encerrou (codigo %s)" % PROCESSO_INTERFACE_ATUAL.returncode
+                          if morreu else "a janela %r nao apareceu em 5s" % alvo_titulo)
+                aviso = "[Interface] AVISO: %s -- %s." % (script.name, motivo)
+                print("  " + aviso)
+                print("  Ultimas linhas de %s:" % LOG_INTERFACE.name)
                 _ultimas_linhas_do_log()
+                try:
+                    with open(LOG_INTERFACE, "a", encoding="utf-8") as log:
+                        log.write("%s | %s\n" % (time.strftime("%H:%M:%S"), aviso))
+                except Exception:
+                    pass
+
+
+# --- fila de troca: um pedido novo SUBSTITUI o anterior, nao entra na fila ---
+#
+# Antes, cada pedido virava uma thread propria e elas se enfileiravam no
+# LOCK_PROC. Como a troca leva 2,4 a 3,4 segundos e a voz confirma na hora, o
+# usuario naturalmente pede de novo -- e o segundo pedido DESTRUIA a janela
+# que o primeiro acabara de criar. Tres pedidos = tres ciclos completos de
+# matar-e-relancar, com a interface piscando. Agora tres pedidos para o mesmo
+# modo custam uma troca.
+MODO_ATUAL = None
+_MODO_DESEJADO = None
+_SINAL_TROCA = threading.Event()
+_WORKER_TROCA = None
+
+CANONICO = {
+    "orbe": "orbe", "esfera": "orbe", "compacto": "orbe",
+    "borda": "bordas", "bordas": "bordas", "moldura": "bordas",
+    "perimetro": "bordas", "ambient": "bordas", "edges": "bordas",
+    "completo": "completo", "painel": "completo", "hud": "completo",
+    "full": "completo",
+}
+
+
+def modo_atual():
+    """Modo em exibicao, ou None se nenhuma interface foi aberta ainda."""
+    return MODO_ATUAL
+
+
+def _laco_de_troca():
+    global _MODO_DESEJADO
+    while True:
+        _SINAL_TROCA.wait()
+        _SINAL_TROCA.clear()
+        while True:
+            alvo, _MODO_DESEJADO = _MODO_DESEJADO, None
+            if alvo is None:
+                break
+            _executar_alternancia(alvo)
+            # Enquanto trocavamos, chegou outro pedido? Atende sem enfileirar.
+            if _MODO_DESEJADO is None:
+                break
 
 
 def alternar_interface(modo="completo"):
-    """Alterna dinamicamente entre as interfaces visuais do Jarvis sem travar a thread principal."""
-    t = threading.Thread(target=_executar_alternancia, args=(modo,), daemon=True)
-    t.start()
+    """Pede a troca de interface. Nao bloqueia a thread que chamou.
+
+    Devolve True se a troca foi agendada, False se ja estamos nesse modo --
+    nesse caso nada e tocado, em vez de matar e relancar a mesma interface.
+    """
+    global _MODO_DESEJADO, _WORKER_TROCA
+
+    alvo = CANONICO.get((modo or "").lower().strip(), "completo")
+    if alvo == MODO_ATUAL and PROCESSO_INTERFACE_ATUAL is not None             and PROCESSO_INTERFACE_ATUAL.poll() is None:
+        print(f"  [Interface] Ja estamos no modo {alvo.upper()}; nada a fazer.")
+        return False
+
+    _MODO_DESEJADO = alvo
+    if _WORKER_TROCA is None or not _WORKER_TROCA.is_alive():
+        _WORKER_TROCA = threading.Thread(target=_laco_de_troca, daemon=True)
+        _WORKER_TROCA.start()
+    _SINAL_TROCA.set()
+    return True
 
 
 def abrir_hud(modo="completo"):

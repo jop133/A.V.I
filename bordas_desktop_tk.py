@@ -85,6 +85,20 @@ PALETAS = {
 }
 
 
+# Uma interface recem-nascida NAO pode aceitar um pedido de saida.
+#
+# O evento de transicao e broadcast para todos os clientes SSE: ele existe
+# para a interface que esta saindo, mas a que acabou de conectar tambem o
+# recebe. E as flags transitioning_* nunca voltam para False -- entao ela
+# nascia ja em modo de saida, tocava a animacao de desaparecer e ficava
+# desenhando nada. Processo vivo, janela existindo, tela vazia: exatamente o
+# sintoma de "pedi o modo bordas e nao mudou".
+#
+# O custo da trava e no maximo perder a animacao de saida numa troca feita
+# nos primeiros segundos. A troca em si acontece de qualquer jeito, porque
+# quem encerra a interface e o hud_bridge, nao ela mesma.
+IGNORAR_TRANSICAO_ATE = 2.0
+
 class JarvisAmbientEdgeOverlay:
     TRANSPARENT_KEY = "#000001"
 
@@ -195,12 +209,13 @@ class JarvisAmbientEdgeOverlay:
                             payload = txt[5:].strip()
                             try:
                                 data = json.loads(payload)
-                                if data.get("action") == "transition_to_full":
-                                    self.transitioning_to_full = True
-                                    self.exit_start_time = time.time()
-                                if data.get("action") == "transition_to_orb":
-                                    self.transitioning_to_orb = True
-                                    self.exit_start_time = time.time()
+                                if self._pode_sair():
+                                    if data.get("action") == "transition_to_full":
+                                        self.transitioning_to_full = True
+                                        self.exit_start_time = time.time()
+                                    if data.get("action") == "transition_to_orb":
+                                        self.transitioning_to_orb = True
+                                        self.exit_start_time = time.time()
                                 if "theme" in data and data["theme"] in PALETAS:
                                     self.current_theme = data["theme"]
                                 if "state" in data:
@@ -209,6 +224,10 @@ class JarvisAmbientEdgeOverlay:
                                 pass
             except Exception:
                 time.sleep(2)
+
+    def _pode_sair(self):
+        """Ja vivi tempo suficiente para aceitar um pedido de saida?"""
+        return (time.time() - self.birth_laser_start) > IGNORAR_TRANSICAO_ATE
 
     def _render_loop(self):
         now = time.time()

@@ -372,9 +372,24 @@ function setState(newState) {
 // --------------------------------------------------------------------------
 // Efeito de Digitação
 // --------------------------------------------------------------------------
+// Timer da digitacao em curso, por elemento. Sem isto, duas chamadas
+// seguidas deixam DUAS cadeias de setTimeout escrevendo no mesmo elemento:
+// limpar o textContent nao para a cadeia antiga, e as letras das duas se
+// intercalam. O resultado e um texto com as letras certas fora de ordem.
+// Aparece sempre, porque o fluxo normal ja manda userSpeech e logo depois
+// jarvisSpeech -- e piorou muito quando a voz passou a sair frase a frase,
+// porque cada frase virou um evento.
+const timersDigitacao = {};
+
 function typeWriter(elementId, text, speed = 18) {
     const el = document.getElementById(elementId);
     if (!el) return;
+
+    if (timersDigitacao[elementId]) {
+        clearTimeout(timersDigitacao[elementId]);
+        timersDigitacao[elementId] = null;
+    }
+
     el.textContent = '';
     let i = 0;
 
@@ -382,7 +397,9 @@ function typeWriter(elementId, text, speed = 18) {
         if (i < text.length) {
             el.textContent += text.charAt(i);
             i++;
-            setTimeout(type, speed);
+            timersDigitacao[elementId] = setTimeout(type, speed);
+        } else {
+            timersDigitacao[elementId] = null;
         }
     }
     type();
