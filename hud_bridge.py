@@ -161,17 +161,6 @@ def _rodar_servidor():
 PROCESSO_INTERFACE_ATUAL = None
 LOCK_PROC = threading.Lock()
 
-TITULOS_JANELAS = [
-    "J.A.R.V.I.S. - Core",
-    "J.A.R.V.I.S. HUD",
-    "JARVIS_DYNAMIC_ISLAND",
-    "JARVIS_TOP_HUD",
-    "JARVIS_NATIVE_ORB",
-    "JARVIS_ORB_WIDGET",
-    "JARVIS_SIRI_ORB"
-]
-
-
 def fechar_interfaces_anteriores():
     """Encerra todas as janelas e processos de interfaces ativas com segurança."""
     global PROCESSO_INTERFACE_ATUAL
@@ -213,12 +202,8 @@ def fechar_interfaces_anteriores():
                 if any(k in title for k in [
                     "J.A.R.V.I.S. - Core",
                     "J.A.R.V.I.S. HUD",
-                    "JARVIS_DYNAMIC_ISLAND",
-                    "JARVIS_TOP_HUD",
                     "JARVIS_NATIVE_ORB",
-                    "JARVIS_ORB_WIDGET",
-                    "JARVIS_SIRI_ORB",
-                    "JARVIS_AMBIENT_EDGES"
+                    "JARVIS_AMBIENT_EDGES",
                 ]):
                     user32.PostMessageW(hwnd, 0x0010, 0, 0) # 0x0010 = WM_CLOSE
             return True

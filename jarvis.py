@@ -31,7 +31,6 @@ import percepcao
 import presenca
 import hud_bridge
 import ferramentas
-import wakeword
 
 BASE = Path(__file__).parent
 CACHE_VOZ = BASE / "vozes" / "cache"
