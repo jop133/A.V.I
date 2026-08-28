@@ -38,6 +38,14 @@ primeira, 0,74s nas seguintes).
 
 ## Como rodar
 
+As dependencias estao no `requirements.txt` -- so as diretas, com um
+comentario dizendo por que cada uma existe. Para recriar o ambiente do zero:
+
+```powershell
+python -m venv .venv
+.\\.venv\\Scripts\\python.exe -m pip install -r requirements.txt
+```
+
 ```powershell
 cd C:\Users\User\Desktop\jarvis-local
 
