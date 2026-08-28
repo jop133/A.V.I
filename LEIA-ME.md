@@ -183,7 +183,7 @@ uma cidade chamada "sua cidade".
 `USAR_FERRAMENTAS = False` volta aos interceptores por substring e ao prompt
 antigo (`SISTEMA_LEGADO`). Os dois continuam no código para isso.
 
-## Três armadilhas de PROMPT que quebraram o comportamento
+## Quatro armadilhas de PROMPT que quebraram o comportamento
 
 **1. Regra anti-alucinação ampla demais.**
 O prompt dizia *"se a resposta não estiver no contexto, diga que não sabe"*.
@@ -215,6 +215,30 @@ conversa contínua contra 1 de 12 depois da inversão.
 
 É a terceira vez que o bloco `[TELA]` muda o comportamento do modelo muito
 além de "dar contexto". Se algo estranho começar a acontecer, suspeite dele.
+
+**4. O Jarvis lia a própria HUD — e parava de agir.**
+Pedir "modo orbe" às vezes só recebia uma confirmação falada, sem a interface
+mudar. Ele não executava: **narrava** que tinha executado. Medido, 15
+repetições por contexto:
+
+```
+janela em foco = HUD do Jarvis     3/15 executaram a ferramenta
+qualquer outra janela             15/15 executaram
+```
+
+O texto narrado entregou o mecanismo: *"Modo Orbe **já está** ativado, senhor."*
+A HUD mostra na legenda a última fala dele; com ela em foco, isso entra no
+bloco `[TELA]` e o modelo lê a própria fala como estado do mundo.
+
+E acontecia na hora errada: depois de trocar de modo, a interface é trazida
+para a frente (`SetForegroundWindow`), então o comando **seguinte** caía
+exatamente nesse caso. Por isso funcionava "às vezes".
+
+É a armadilha nº 2 de novo, um nível acima: `e_o_proprio_console()` só
+detectava o console. Agora `e_a_propria_interface()` reconhece a HUD, o orbe e
+as bordas pelo título. E o prompt ganhou uma regra explícita: *nunca diga que
+executou uma ação; para agir, use a ferramenta.* Cada uma resolve sozinha; as
+duas juntas dão 48 de 48.
 
 **2. O Jarvis lia o próprio terminal.**
 Iniciado pelo `.bat`, a janela em foco é o console dele mesmo — e o banner diz
