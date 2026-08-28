@@ -39,6 +39,16 @@ def _limpar(texto):
     return t
 
 
+# Titulos das janelas do proprio Jarvis. Ler qualquer uma delas como "a tela
+# do usuario" e se olhar no espelho.
+TITULOS_PROPRIOS = (
+    "J.A.R.V.I.S",            # HUD completa, no navegador
+    "JARVIS_NATIVE_ORB",      # orbe
+    "JARVIS_AMBIENT_EDGES",   # bordas
+    "trillion // jarvis",
+)
+
+
 def e_o_proprio_console() -> bool:
     """A janela em foco e o console onde o Jarvis esta rodando?
 
@@ -52,6 +62,29 @@ def e_o_proprio_console() -> bool:
         return bool(console) and console == frente
     except Exception:
         return False
+
+
+def e_a_propria_interface() -> bool:
+    """A janela em foco e uma das interfaces do proprio Jarvis?
+
+    Mesmo problema do console, com consequencia pior: a HUD mostra na legenda
+    a ULTIMA FALA dele. Lendo isso como tela do usuario, o modelo ve escrito
+    "Modo Orbe ativado, senhor" e conclui que a acao ja foi feita -- entao
+    responde "ja esta ativado" em vez de CHAMAR a ferramenta.
+
+    Medido: com a HUD em foco, o pedido de trocar de modo virava narracao em
+    8 de 10 tentativas; com qualquer outra janela, 10 de 10 executavam.
+
+    E acontece justamente na hora errada: depois de trocar de modo, a propria
+    interface e trazida para frente (SetForegroundWindow), entao o comando
+    seguinte cai exatamente neste caso.
+    """
+    try:
+        j = auto.GetForegroundControl()
+        titulo = (j.Name or "")
+    except Exception:
+        return False
+    return any(t in titulo for t in TITULOS_PROPRIOS)
 
 
 def janela_ativa():
@@ -143,7 +176,7 @@ def contexto(limite_caracteres=600):
     """Bloco de contexto pronto para entrar no prompt do modelo."""
     t0 = time.perf_counter()
 
-    if e_o_proprio_console():
+    if e_o_proprio_console() or e_a_propria_interface():
         # Nada util aqui, e ainda confunde o modelo. Melhor dizer so isso.
         return ("[TELA] O usuario esta com a janela do proprio Jarvis em foco; "
                 "nao ha nada relevante para ver."), (time.perf_counter() - t0) * 1000
