@@ -16,6 +16,7 @@ import io
 import json
 import os
 import queue
+import re
 import sys
 import threading
 import time
@@ -68,6 +69,10 @@ CARTESIA_VELOCIDADE = 1.0
 SALA_REVERB = 0.48    # 0 = seco | 0.32 = sala | 0.48 = sala grande
 SALA_GRAVES = 1.45    # 1.0 = sem reforco
 SALA_COMPRESSAO = True
+
+# A voz emenda no modelo, frase a frase, em vez de esperar a resposta
+# inteira. Ponha False para voltar ao modo antigo (falar so no fim).
+VOZ_STREAMING = True
 
 # Piper TTS (100% offline)
 VOZ_TTS = BASE / "vozes" / "pt_BR-faber-medium.onnx"
@@ -180,6 +185,36 @@ class Etapas:
     def marca(self, nome):
         self.marcas.append((nome, time.perf_counter() - self.t0))
 
+    def procurar(self, trecho):
+        """Tempo da primeira marca cujo nome contem `trecho`, ou None."""
+        for nome, t in self.marcas:
+            if trecho in nome:
+                return t
+        return None
+
+    def resumo(self):
+        """Numeros para a HUD, buscados por NOME.
+
+        Era por indice fixo (marcas[2] - marcas[1]), o que ja era fragil
+        porque cada caminho de ciclo() produz um conjunto diferente de marcas.
+        Com a voz emendando no modelo ficou impossivel: a marca da fala passa
+        a vir ANTES da marca de resposta completa, entao os indices se cruzam.
+        """
+        whisper = self.procurar("Whisper")
+        token = self.procurar("1o token")
+        fala = self.procurar("FALA")
+        total = self.marcas[-1][1] if self.marcas else None
+
+        def fmt(v):
+            return "%.2fs" % v if v is not None else "--"
+
+        return {
+            "whisper": fmt(whisper),
+            "llm": fmt(token - whisper if (token and whisper) else token),
+            "tts": fmt(fala - token if (fala and token) else fala),
+            "total": fmt(total),
+        }
+
     def relatorio(self):
         print()
         print("  " + "-" * 54)
@@ -198,6 +233,232 @@ class Etapas:
 
 
 # ----------------------------------------------------------------------- voz
+
+class SeparadorDeFalas:
+    """Recebe pedacos do modelo e devolve frases prontas para falar.
+
+    Existe para a voz emendar no modelo em vez de esperar a resposta inteira.
+    Numa resposta longa a espera custava 2,37s parados.
+
+    Tres responsabilidades, nesta ordem -- e a ordem importa:
+
+    1. Segurar o comeco ate saber se a resposta e um [CONSULTAR:]. Se for,
+       nada e falado: quem responde e o caminho web. Sem essa trava o Jarvis
+       comecaria a ler a propria tag em voz alta.
+    2. Remover as tags do inicio ([COR:], [BRILHO:] e qualquer vazamento como
+       [TELA]). Elas sao dados de sistema, nao fala.
+    3. So entao cortar em frases e liberar.
+
+    A primeira frase e quebrada numa virgula se passar de `limite_primeira`
+    caracteres: o custo dos motores de rede cresce com o tamanho do texto
+    (medido no Edge: 3,90s para ~100 caracteres contra 1,18s para uma curta),
+    e a primeira e a unica que o usuario espera em silencio.
+    """
+
+    # Uma tag: [PALAVRA] ou [PALAVRA: conteudo]. Ancorada no inicio do buffer.
+    TAG_INICIAL = re.compile(r'^\s*\[[A-ZÀ-Ú][A-ZÀ-Ú_ ]*(?::[^\]]*)?\]\s*')
+
+    # Fim de frase: pontuacao seguida de espaco ou do fim do texto. Exigir o
+    # espaco e o que impede quebrar em "1.5" ou "R$ 3.40".
+    FIM_DE_FRASE = re.compile(r'[.!?]+["\')\]]?(?=\s|$)')
+
+    # Quando o modelo devolve o bloco de tela de volta, o que vaza nao e so a
+    # tag -- e a LINHA inteira ("[TELA] Janela ativa: Code"). Descartar so a
+    # tag deixaria "Janela ativa: Code" virar fala.
+    MARCADORES_VAZAMENTO = ("[TELA]", "[CURSOR]", "[CONTEUDO VISIVEL]",
+                            "[DADOS DO SISTEMA", "[USUARIO]:", "[JARVIS]:")
+
+    def __init__(self, limite_primeira=70):
+        self.buffer = ""
+        self.bloqueado = False      # virou [CONSULTAR:] -- nao fala nada
+        self.descartando_linha = False
+        self.primeira = True
+        self.limite_primeira = limite_primeira
+
+    # ------------------------------------------------------------------ util
+
+    def _inicio_ambiguo(self):
+        """O comeco ainda pode virar uma tag que muda tudo?
+
+        Enquanto o buffer for so um '[' sem o ']' correspondente, nao da para
+        saber se e [COR: azul] (remover) ou [CONSULTAR: ...] (nao falar nada).
+        Na duvida, segura.
+        """
+        ini = self.buffer.lstrip()
+        if not ini:
+            return True
+        return ini.startswith("[") and "]" not in ini
+
+    def _consumir_tags(self):
+        """Remove as tags do inicio do buffer. Devolve True se nada pode sair."""
+        while True:
+            # Terminando de descartar uma linha vazada do bloco de tela.
+            if self.descartando_linha:
+                quebra = self.buffer.find("\n")
+                if quebra == -1:
+                    self.buffer = ""
+                    return True          # a linha ainda nao acabou: segura
+                self.buffer = self.buffer[quebra + 1:]
+                self.descartando_linha = False
+                continue
+
+            ini = self.buffer.lstrip()
+            if not ini:
+                return False
+            alto = ini.upper()
+
+            if alto.startswith("[CONSULTAR:"):
+                self.bloqueado = True
+                return True
+
+            if any(alto.startswith(mk) for mk in self.MARCADORES_VAZAMENTO):
+                self.buffer = ini
+                self.descartando_linha = True
+                continue
+
+            m = self.TAG_INICIAL.match(self.buffer)
+            if not m:
+                return False
+            self.buffer = self.buffer[m.end():]
+
+    def _quebrar_primeira(self, frase):
+        """Corta a primeira frase numa virgula se ela for longa demais."""
+        if len(frase) <= self.limite_primeira:
+            return None
+        corte = frase.rfind(",", 0, self.limite_primeira)
+        if corte < 20:          # virgula cedo demais nao ajuda
+            return None
+        return frase[:corte + 1].strip(), frase[corte + 1:].strip()
+
+    # ------------------------------------------------------------- interface
+
+    def alimentar(self, pedaco):
+        """Adiciona um pedaco do modelo. Devolve a lista de frases prontas."""
+        if self.bloqueado:
+            self.buffer += pedaco
+            return []
+
+        self.buffer += pedaco
+        if self._inicio_ambiguo():
+            return []
+        if self._consumir_tags():
+            return []
+
+        prontas = []
+        while True:
+            m = self.FIM_DE_FRASE.search(self.buffer)
+            if not m:
+                break
+            frase = self.buffer[:m.end()].strip()
+            resto = self.buffer[m.end():]
+            if not frase:
+                self.buffer = resto
+                continue
+
+            if self.primeira:
+                partido = self._quebrar_primeira(frase)
+                if partido:
+                    cabeca, cauda = partido
+                    prontas.append(cabeca)
+                    self.primeira = False
+                    self.buffer = cauda + resto
+                    continue
+
+            prontas.append(frase)
+            self.primeira = False
+            self.buffer = resto
+
+        return prontas
+
+    def finalizar(self):
+        """Ultimo pedaco, sem pontuacao final. Devolve lista (0 ou 1 frase)."""
+        if self.bloqueado:
+            return []
+        if self._consumir_tags() or self.bloqueado:
+            return []
+
+        resto = self.buffer.strip()
+        self.buffer = ""
+
+        # Tag cortada no meio pelo num_predict: "[CONSU" nao e fala. Falar o
+        # comeco de uma tag e pior do que perder o pedaco.
+        if resto.startswith("[") and "]" not in resto:
+            return []
+
+        return [resto] if resto else []
+
+
+class FluxoDeFala:
+    """Fala as frases na ordem, sintetizando a proxima enquanto a atual toca.
+
+    Sem isto cada frase pagaria a latencia do motor em silencio -- medido no
+    Edge, 11,7s de pausas numa resposta longa. Duas threads:
+
+        fila_texto  --[sintetiza]-->  fila_audio  --[toca]-->  alto-falante
+
+    Uma unica thread de cada lado, entao a ordem das frases e preservada por
+    construcao: nao ha corrida possivel entre frases.
+    """
+
+    def __init__(self, voz, ao_primeiro_audio=None):
+        self.voz = voz
+        self.ao_primeiro_audio = ao_primeiro_audio
+        self.fila_texto = queue.Queue()
+        self.fila_audio = queue.Queue()
+        self.faladas = []
+        self.erros = []
+        self._t_sintese = threading.Thread(target=self._laco_sintese, daemon=True)
+        self._t_toque = threading.Thread(target=self._laco_toque, daemon=True)
+        self._t_sintese.start()
+        self._t_toque.start()
+
+    def dizer(self, frase):
+        if frase and frase.strip():
+            self.faladas.append(frase.strip())
+            self.fila_texto.put(frase.strip())
+
+    def _laco_sintese(self):
+        while True:
+            frase = self.fila_texto.get()
+            if frase is None:
+                self.fila_audio.put(None)
+                return
+            try:
+                pcm, taxa = self.voz.sintetizar(frase)
+                tratado = presenca.tratar(pcm, taxa, reverb=SALA_REVERB,
+                                          graves=SALA_GRAVES,
+                                          compressao=SALA_COMPRESSAO)
+                self.fila_audio.put((tratado, taxa))
+            except Exception as e:
+                # Uma frase que falha nao pode derrubar o resto da resposta.
+                self.erros.append(e)
+                print(f"  [Voz: frase pulada -- {e}]")
+
+    def _laco_toque(self):
+        primeiro = True
+        while True:
+            item = self.fila_audio.get()
+            if item is None:
+                return
+            pcm, taxa = item
+            try:
+                if primeiro:
+                    primeiro = False
+                    if self.ao_primeiro_audio:
+                        self.ao_primeiro_audio()
+                sd.play(np.frombuffer(pcm, dtype=np.int16), samplerate=taxa)
+                sd.wait()
+            except Exception as e:
+                self.erros.append(e)
+                print(f"  [Voz: falha ao reproduzir -- {e}]")
+
+    def finalizar(self, timeout=120):
+        """Espera tudo que ja foi enfileirado terminar de tocar."""
+        self.fila_texto.put(None)
+        self._t_sintese.join(timeout=timeout)
+        self._t_toque.join(timeout=timeout)
+        return " ".join(self.faladas).strip()
+
 
 class Voz:
     """Motor de voz multi-backend com cache inteligente e contingencia: Cartesia -> Edge -> Piper."""
@@ -451,7 +712,8 @@ def consultar_gemini_web(pergunta, contexto_tela):
 
 # --------------------------------------------------------------------- cerebro
 
-def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None):
+def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None,
+           ao_frase_pronta=None):
     """qwen3 local, via /api/chat com historico explicito de mensagens.
 
     `think:false` e essencial: com o modo pensante ligado o tempo ate a
@@ -493,6 +755,8 @@ def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None):
                                  headers={"Content-Type": "application/json"})
     partes = []
     primeiro = True
+    separador = SeparadorDeFalas() if ao_frase_pronta else None
+
     with urllib.request.urlopen(req, timeout=300) as r:
         for linha in r:
             if not linha.strip():
@@ -505,6 +769,13 @@ def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None):
                     if ao_primeiro_token:
                         ao_primeiro_token()
                 partes.append(pedaco)
+                if separador:
+                    for frase in separador.alimentar(pedaco):
+                        ao_frase_pronta(frase)
+
+    if separador:
+        for frase in separador.finalizar():
+            ao_frase_pronta(frase)
 
     resposta = "".join(partes).strip()
 
@@ -646,14 +917,25 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo=""):
         activeTarget=cur_desc or "Cursor Ativo"
     )
 
+    # A voz emenda no modelo: cada frase pronta ja vai sendo falada enquanto
+    # ele escreve o resto. O FluxoDeFala sintetiza a proxima enquanto a atual
+    # toca, entao nao ha silencio entre elas.
+    fluxo = None
+    if VOZ_STREAMING:
+        fluxo = FluxoDeFala(voz, ao_primeiro_audio=lambda: e.marca("5. Voz (1o audio) <- FALA"))
+
+    def _frase(f):
+        hud_bridge.notificar(state="speaking", jarvisSpeech=f)
+        fluxo.dizer(f)
+
     resposta, novo_hist = pensar(texto, contexto_tela, historico,
-                                 ao_primeiro_token=lambda: e.marca("3. qwen3 (1o token)"))
+                                 ao_primeiro_token=lambda: e.marca("3. qwen3 (1o token)"),
+                                 ao_frase_pronta=_frase if fluxo else None)
     e.marca("4. qwen3 (resposta completa)")
     
     # --- Processamento de Ações Emitidas pelo Qwen3 (Cores e Brilho) ---
     dados_hud_acao = {}
     if "[COR:" in resposta:
-        import re
         m_cor = re.search(r'\[COR:\s*([a-zA-ZáàâãéèêíïóôõöúçñÁÀÂÃÉÈÊÍÏÓÔÕÖÚÇÑ]+)\]', resposta)
         if m_cor:
             cor_tag = m_cor.group(1).lower().strip()
@@ -666,7 +948,6 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo=""):
         resposta = re.sub(r'\[COR:[^\]]+\]', '', resposta).strip()
 
     if "[BRILHO:" in resposta:
-        import re
         if "[BRILHO: +]" in resposta:
             BRILHO_HUD_ATUAL = min(2.0, round(BRILHO_HUD_ATUAL + 0.35, 2))
             dados_hud_acao["brightness"] = BRILHO_HUD_ATUAL
@@ -686,6 +967,11 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo=""):
 
     # --- Roteamento Web Invisível ---
     if resposta.strip().startswith("[CONSULTAR:"):
+        # O separador ja tinha bloqueado a fala ao ver a tag; encerra o fluxo
+        # vazio para as threads nao ficarem penduradas.
+        if fluxo:
+            fluxo.finalizar()
+            fluxo = None
         pergunta_nuvem = resposta.replace("[CONSULTAR:", "").replace("]", "").strip()
         print(f"  [ROTEAMENTO] Qwen3 delegou para a Web. Pergunta: {pergunta_nuvem}")
         hud_bridge.notificar(state="web", jarvisSpeech="Deixe-me pesquisar isso a fundo na web para você.")
@@ -704,8 +990,23 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo=""):
         e.marca("7. Voz (resposta da Web) <- FALA")
     else:
         print("  Jarvis (Local): %r" % resposta[:150])
-        hud_bridge.notificar(state="speaking", jarvisSpeech=resposta, **dados_hud_acao)
-        voz.falar(resposta, ao_primeiro=lambda: e.marca("5. Voz (1o audio) <- FALA"))
+        if dados_hud_acao:
+            hud_bridge.notificar(state="speaking", **dados_hud_acao)
+        if fluxo:
+            # As frases ja foram enfileiradas durante o streaming; aqui so
+            # esperamos a ultima terminar de tocar.
+            falado = fluxo.finalizar()
+            fluxo = None
+            if falado:
+                resposta = falado
+            else:
+                # O separador nao liberou nada (resposta so de tags, por
+                # exemplo). Cai no modo antigo para nao ficar mudo.
+                hud_bridge.notificar(state="speaking", jarvisSpeech=resposta)
+                voz.falar(resposta, ao_primeiro=lambda: e.marca("5. Voz (1o audio) <- FALA"))
+        else:
+            hud_bridge.notificar(state="speaking", jarvisSpeech=resposta)
+            voz.falar(resposta, ao_primeiro=lambda: e.marca("5. Voz (1o audio) <- FALA"))
         e.marca("6. terminou de falar")
 
     # O historico guarda o que o Jarvis FALOU, nao a saida crua do modelo.
@@ -721,12 +1022,7 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo=""):
     e.relatorio()
     hud_bridge.notificar(
         state="idle",
-        benchmarks={
-            "whisper": "%.2fs" % e.marcas[0][1] if e.marcas else "120ms",
-            "llm": "%.2fs" % (e.marcas[2][1] - e.marcas[1][1]) if len(e.marcas) > 2 else "210ms",
-            "tts": "%.2fs" % (e.marcas[-1][1] - e.marcas[-2][1]) if len(e.marcas) > 3 else "85ms",
-            "total": "%.2fs" % e.marcas[-1][1] if e.marcas else "0.45s"
-        }
+        benchmarks=e.resumo()
     )
     return novo_hist
 
