@@ -1,0 +1,54 @@
+# Dependências diretas do Jarvis local — Python 3.13
+#
+#     .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+#
+# Só o que o projeto importa de fato. As dependências dessas (onnxruntime,
+# ctranslate2, aiohttp, cffi e companhia) o pip resolve sozinho — não estão
+# listadas aqui para a lista continuar legível e fácil de manter.
+#
+# Em 28/ago/2026 o venv tinha 64 pacotes e 644 MB. Depois de remover a
+# biblioteca `g4f` e as 11 que vieram junto com ela, ficou em 53 e 507 MB.
+# Esta lista existe para que uma reinstalação não traga tudo de volta.
+
+
+# --- Núcleo: escuta, fala e leitura de tela -------------------------------
+
+faster-whisper==1.2.1     # fala -> texto, local (modelo `small`, int8, CPU)
+sounddevice==0.5.6        # microfone e alto-falante
+soundfile==0.14.0         # decodifica o MP3 que o Edge devolve
+uiautomation==2.0.29      # árvore de acessibilidade do Windows: a leitura de
+                          # tela sem modelo de visão, em ~110 ms
+numpy==2.5.2              # PCM, VAD e todo o tratamento de áudio
+scipy==1.18.1             # lfilter no realce de graves (presenca.py). Sem ele
+                          # há um laço em numpy que funciona, mas é lento
+
+
+# --- Vozes: a cadeia de reserva é Cartesia -> Edge -> Piper ---------------
+
+requests==2.34.2          # Cartesia (motor padrão) e nada mais
+edge-tts==7.2.8           # reserva online, sem chave. PRECISA do aiohttp:
+                          # se ele sumir, a reserva quebra em silêncio e você
+                          # só descobre no dia em que a Cartesia falhar
+piper-tts==1.7.0          # último recurso, 100% local — é o que garante que
+                          # o Jarvis continue falando sem internet
+
+
+# --- Opcionais ------------------------------------------------------------
+
+kokoro-onnx==0.6.1        # só o comparar_kokoro.py usa. Pode sair se você
+                          # decidir que não vai mais comparar vozes
+
+# onnxruntime já entra como dependência do faster-whisper, do piper-tts e do
+# kokoro-onnx. Fica anotado aqui porque o LEIA-ME conta com ele para um
+# eventual OCR local (jogos não expõem árvore de acessibilidade).
+
+
+# --- O que NÃO deve voltar ------------------------------------------------
+#
+# g4f — foi removida em 28/ago/2026. Ela não falava com o Google: conversava
+# com endpoints de engenharia reversa de terceiros, e o Jarvis mandava junto
+# o texto da janela em foco. Trouxe yt-dlp, curl-cffi, pywebview, bottle,
+# pythonnet, clr-loader, proxy-tools, imageio-ffmpeg, nest-asyncio2,
+# pycryptodome e brotli — 137 MB no total.
+#
+# Se ela reaparecer no `pip list`, alguma coisa a reintroduziu.
