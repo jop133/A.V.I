@@ -87,22 +87,43 @@ com o Piper, medido em 3 turnos locais seguidos:
 |---|---|
 | Espera do VAD (deliberada) | 0,70s |
 | Whisper | **0,00s** — roda dentro da espera acima |
-| Contexto de tela (UI Automation) | 0,10s |
-| qwen3:8b até o 1º token | 1,36–1,64s |
+| qwen3:8b até o 1º token | 0,23–0,25s |
 | 1ª frase pronta + Piper | 0,07–0,18s |
-| **Total** | **3,59s** (3,35–3,64s) |
+| **Total** | **2,10s** (1,98–2,20s) |
 
-O Whisper não aparece na conta porque acontece durante um silêncio que já ia
-existir de qualquer jeito, e a voz não espera mais a resposta inteira.
+Duas coisas somem da conta. O Whisper, porque acontece durante um silêncio que
+já ia existir de qualquer jeito. E o contexto de tela, porque deixou de ir em
+toda pergunta — virou a ferramenta `ler_tela`.
 
-**Por que 3,59s e não os 3,05s de antes.** As ferramentas declaradas ao modelo
-custam 439 tokens de prefill em **toda** pergunta, inclusive nas que não usam
-ferramenta nenhuma: +0,33s no 1º token, +0,54s no ciclo. É o preço de o modelo
-decidir por intenção em vez de casarmos substrings. `USAR_FERRAMENTAS = False`
-devolve os 0,54s e junto com eles os erros de roteamento.
+**A medição que mudou tudo.** Eu atribuía a lentidão do 1º token às ferramentas
+declaradas. Errado:
 
-Turnos de **ferramenta** vão na direção oposta: uma cotação levava 5–19s
-quando caía no caminho web, e agora resolve em ~2,1s.
+| | 1º token |
+|---|---|
+| sem tela, sem ferramentas | 0,20s |
+| sem tela, **com** ferramentas | 0,24s |
+| **com tela**, sem ferramentas | 0,91s |
+| com tela, com ferramentas | 1,19s |
+
+As ferramentas ficam no prefixo, que o Ollama cacheia, e custam **+0,04s**.
+Quem pagava o pedágio era o bloco `[TELA]`: ele muda a cada turno, então nunca
+é cacheado, e custava **+0,95s em toda pergunta** — inclusive em "bom dia".
+
+**O que custa mais agora.** Perguntas sobre a tela passaram de 3,9s para 4,6s,
+porque exigem duas idas ao modelo: ele pede `ler_tela`, lê, e só então responde.
+É a troca consciente — a maioria dos turnos não é sobre a tela.
+
+E o efeito colateral é o melhor: **as quatro armadilhas de prompt abaixo são
+todas o bloco `[TELA]`.** Fora do caminho padrão, nenhuma delas pode acontecer.
+Só existe risco quando o modelo pede a tela de propósito.
+
+Medido com 5 repetições em 6 frases sobre a tela e 4 que não são:
+**30/30 pedem `ler_tela` quando devem, 20/20 não pedem quando não devem.**
+Essa segunda coluna importa tanto quanto a primeira: uma ferramenta que dispara
+à toa devolveria o custo que acabamos de eliminar.
+
+`TELA_COMO_FERRAMENTA = False` no topo do `jarvis.py` volta ao comportamento
+antigo.
 
 Referência: o Gemini na nuvem entregou 0,75s — mas com picos de 47s e cota.
 

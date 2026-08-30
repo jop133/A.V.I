@@ -80,6 +80,13 @@ VOZ_STREAMING = True
 # continuam no codigo justamente para isso.
 USAR_FERRAMENTAS = True
 
+# A leitura de tela vira FERRAMENTA em vez de ir colada em toda pergunta.
+# Medido: o bloco [TELA] custava 0,95s do 1o token (1,19s com ele, 0,24s sem),
+# porque muda a cada turno e por isso nunca entra no cache de prefixo. E era
+# a origem das QUATRO armadilhas de prompt registradas no LEIA-ME. Agora o
+# modelo pede a tela quando precisa dela.
+TELA_COMO_FERRAMENTA = True
+
 # Piper TTS (100% offline)
 VOZ_TTS = BASE / "vozes" / "pt_BR-faber-medium.onnx"
 
@@ -107,7 +114,8 @@ Regras:
 - NUNCA repita, leia ou exiba tags de telemetria como [TELA], [CURSOR] ou [CONTEUDO VISIVEL]. Elas sao dados invisiveis do sistema para sua orientacao silenciosa. Fale apenas o dialogo com o senhor.
 - Nunca faca listas longas nem use introducoes ou saudacoes repetitivas.
 - Trate o usuario por "senhor" com naturalidade, sem exagero.
-- Voce NUNCA diz que executou uma acao. Para agir, use a ferramenta correspondente. Se o texto que aparece na tela disser que algo ja esta ativo, isso NAO dispensa a ferramenta: use assim mesmo."""
+- Voce NUNCA diz que executou uma acao. Para agir, use a ferramenta correspondente. Se o texto que aparece na tela disser que algo ja esta ativo, isso NAO dispensa a ferramenta: use assim mesmo.
+- Voce NAO enxerga a tela sozinho. Para falar de qualquer coisa que esteja na tela do senhor, use a ferramenta ler_tela ANTES de responder. Nunca descreva a tela de memoria nem por suposicao."""
 
 # Prompt do modo de rollback (USAR_FERRAMENTAS = False). Descreve as tags que
 # os interceptores antigos sabem interpretar. So e usado nesse modo -- manter
@@ -229,6 +237,14 @@ FERRAMENTAS_LLM = [
             "required": ["modo"]}}},
 
     {"type": "function", "function": {
+        "name": "ler_tela",
+        "description": "Le o que esta na tela do usuario neste instante: janela "
+                       "ativa, elemento sob o cursor e o texto visivel. Use "
+                       "sempre que a pergunta for sobre a tela, sobre o que ele "
+                       "esta vendo, lendo ou fazendo agora no computador.",
+        "parameters": {"type": "object", "properties": {}}}},
+
+    {"type": "function", "function": {
         "name": "obter_cotacao",
         "description": "Cotacao ao vivo de uma moeda em reais. Use apenas para "
                        "perguntas sobre o valor ou preco de uma moeda.",
@@ -322,6 +338,13 @@ def executar_ferramenta(nome, argumentos):
             cidade = ""
         return (ferramentas.obter_clima(cidade or None)
                 or "Nao consegui a previsao agora, senhor."), {}
+
+    if nome == "ler_tela":
+        # Unica ferramenta que INFORMA em vez de responder: o texto da tela nao
+        # e resposta ao usuario, precisa voltar ao modelo. Sinalizado com a
+        # chave "para_o_modelo", que o ciclo trata como segunda ida.
+        texto, _ = percepcao.contexto(limite_caracteres=1200)
+        return None, {"para_o_modelo": texto}
 
     print("  [Ferramenta desconhecida pedida pelo modelo: %r]" % nome)
     return None, {}
@@ -844,7 +867,7 @@ class Ouvido:
 # --------------------------------------------------------------------- cerebro
 
 def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None,
-           ao_frase_pronta=None):
+           ao_frase_pronta=None, extras=None):
     """qwen3 local, via /api/chat com historico explicito de mensagens.
 
     `think:false` e essencial: com o modo pensante ligado o tempo ate a
@@ -878,7 +901,8 @@ def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None,
     sistema = SISTEMA if USAR_FERRAMENTAS else SISTEMA_LEGADO
     mensagens = ([{"role": "system", "content": sistema}]
                  + anteriores
-                 + [{"role": "user", "content": conteudo}])
+                 + [{"role": "user", "content": conteudo}]
+                 + list(extras or []))
 
     corpo = {
         "model": MODELO_LLM, "messages": mensagens,
@@ -1211,7 +1235,11 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
         return historico
 
     # Leitura de contexto e envio de telemetria para a HUD
-    contexto_tela, _ = percepcao.contexto(limite_caracteres=1200)
+    # No modo novo a tela NAO vai colada na pergunta: o modelo pede com a
+    # ferramenta ler_tela quando precisa. Isso tira 0,95s do 1o token de todo
+    # turno e some com a origem das quatro armadilhas de prompt do LEIA-ME.
+    contexto_tela = "" if TELA_COMO_FERRAMENTA else percepcao.contexto(
+        limite_caracteres=1200)[0]
     e.marca("2. contexto de tela (UI Automation)")
 
     j_info = percepcao.janela_ativa()
@@ -1259,7 +1287,7 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
         if fluxo:
             fluxo.finalizar()
             fluxo = None
-        falas, dados_hud = [], {}
+        falas, dados_hud, para_o_modelo = [], {}, []
         for chamada in chamadas:
             fn = chamada.get("function") or {}
             texto_fer, dados = executar_ferramenta(fn.get("name"), fn.get("arguments"))
@@ -1267,7 +1295,44 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
                   % (fn.get("name"), fn.get("arguments"), (texto_fer or "")[:60]))
             if texto_fer:
                 falas.append(texto_fer)
+            if "para_o_modelo" in dados:
+                para_o_modelo.append((chamada, dados.pop("para_o_modelo")))
             dados_hud.update(dados)
+
+        # Ferramenta que INFORMA (hoje so a ler_tela): o resultado nao e
+        # resposta, volta ao modelo para ele redigir. As demais falam direto,
+        # que e o que segura o custo dos turnos de acao.
+        if para_o_modelo:
+            e.marca("5. ler_tela executada")
+            extras = []
+            for chamada, conteudo in para_o_modelo:
+                extras.append({"role": "assistant", "content": "",
+                               "tool_calls": [chamada]})
+                extras.append({"role": "tool", "content": conteudo})
+            fluxo = FluxoDeFala(
+                voz, ao_primeiro_audio=lambda: e.marca("7. Voz (1o audio) <- FALA")
+            ) if VOZ_STREAMING else None
+            faladas_hud.clear()
+            resposta, novo_hist, _ = pensar(
+                texto, "", historico, extras=extras,
+                ao_primeiro_token=lambda: e.marca("6. qwen3 (1o token, 2a ida)"),
+                ao_frase_pronta=_frase if fluxo else None)
+            e.marca("8. resposta completa")
+            if fluxo:
+                falado = fluxo.finalizar()
+                if falado:
+                    resposta = falado
+                else:
+                    voz.falar(resposta)
+            else:
+                hud_bridge.notificar(state="speaking", jarvisSpeech=resposta)
+                voz.falar(resposta)
+            if novo_hist and novo_hist[-1].get("role") == "assistant":
+                novo_hist[-1]["content"] = resposta
+            e.relatorio()
+            hud_bridge.notificar(state="idle", benchmarks=e.resumo())
+            return novo_hist
+
         resposta = " ".join(falas).strip() or "Feito, senhor."
         e.marca("5. ferramenta executada")
         hud_bridge.notificar(state="speaking", jarvisSpeech=resposta, **dados_hud)
