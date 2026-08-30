@@ -409,6 +409,26 @@ class Etapas:
 
 # ----------------------------------------------------------------------- voz
 
+# A fala em curso, para a tecla de atalho saber o que interromper. E uma so
+# por vez: o ciclo e sequencial.
+FALA_EM_CURSO = None
+
+
+def interromper_fala():
+    """Corta a fala atual. Chamada pela tecla de atalho, de outra thread."""
+    global FALA_EM_CURSO
+    fluxo = FALA_EM_CURSO
+    if fluxo is not None:
+        fluxo.interromper()
+    else:
+        try:
+            sd.stop()          # caminho sem streaming (voz.falar direto)
+        except Exception:
+            pass
+    print("\n  [Atalho] fala interrompida.")
+    hud_bridge.notificar(state="idle")
+
+
 class SeparadorDeFalas:
     """Recebe pedacos do modelo e devolve frases prontas para falar.
 
@@ -576,15 +596,34 @@ class FluxoDeFala:
         self.fila_audio = queue.Queue()
         self.faladas = []
         self.erros = []
+        self.interrompido = threading.Event()
         self._t_sintese = threading.Thread(target=self._laco_sintese, daemon=True)
         self._t_toque = threading.Thread(target=self._laco_toque, daemon=True)
         self._t_sintese.start()
         self._t_toque.start()
 
     def dizer(self, frase):
-        if frase and frase.strip():
-            self.faladas.append(frase.strip())
+        if frase and frase.strip() and not self.interrompido.is_set():
             self.fila_texto.put(frase.strip())
+
+    def interromper(self):
+        """Corta a fala agora: esvazia as duas filas e para o audio.
+
+        Esvaziar AS DUAS importa. Parar so o som deixaria a proxima frase, ja
+        sintetizada e esperando, comecar a tocar logo em seguida -- o usuario
+        interromperia e ouviria o Jarvis continuar assim mesmo.
+        """
+        self.interrompido.set()
+        for fila in (self.fila_texto, self.fila_audio):
+            while True:
+                try:
+                    fila.get_nowait()
+                except queue.Empty:
+                    break
+        try:
+            sd.stop()
+        except Exception:
+            pass
 
     def _laco_sintese(self):
         while True:
@@ -592,12 +631,14 @@ class FluxoDeFala:
             if frase is None:
                 self.fila_audio.put(None)
                 return
+            if self.interrompido.is_set():
+                continue
             try:
                 pcm, taxa = self.voz.sintetizar(frase)
                 tratado = presenca.tratar(pcm, taxa, reverb=SALA_REVERB,
                                           graves=SALA_GRAVES,
                                           compressao=SALA_COMPRESSAO)
-                self.fila_audio.put((tratado, taxa))
+                self.fila_audio.put((frase, tratado, taxa))
             except Exception as e:
                 # Uma frase que falha nao pode derrubar o resto da resposta.
                 self.erros.append(e)
@@ -609,7 +650,9 @@ class FluxoDeFala:
             item = self.fila_audio.get()
             if item is None:
                 return
-            pcm, taxa = item
+            if self.interrompido.is_set():
+                continue
+            frase, pcm, taxa = item
             try:
                 if primeiro:
                     primeiro = False
@@ -617,6 +660,11 @@ class FluxoDeFala:
                         self.ao_primeiro_audio()
                 sd.play(np.frombuffer(pcm, dtype=np.int16), samplerate=taxa)
                 sd.wait()
+                # Contabiliza a frase DEPOIS de tocar, nao ao enfileirar: se o
+                # usuario interromper, o historico precisa guardar o que ele
+                # ouviu, nao o que o Jarvis pretendia dizer.
+                if not self.interrompido.is_set():
+                    self.faladas.append(frase)
             except Exception as e:
                 self.erros.append(e)
                 print(f"  [Voz: falha ao reproduzir -- {e}]")
@@ -1257,9 +1305,11 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
     # A voz emenda no modelo: cada frase pronta ja vai sendo falada enquanto
     # ele escreve o resto. O FluxoDeFala sintetiza a proxima enquanto a atual
     # toca, entao nao ha silencio entre elas.
+    global FALA_EM_CURSO
     fluxo = None
     if VOZ_STREAMING:
         fluxo = FluxoDeFala(voz, ao_primeiro_audio=lambda: e.marca("5. Voz (1o audio) <- FALA"))
+    FALA_EM_CURSO = fluxo
 
     # A HUD recebe o texto ACUMULADO, nao a frase solta: mandando frase a
     # frase ela ficaria trocando de legenda a cada uma, em vez de mostrar a
@@ -1405,6 +1455,7 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
     if novo_hist and novo_hist[-1].get("role") == "assistant":
         novo_hist[-1]["content"] = resposta
 
+    FALA_EM_CURSO = None
     e.relatorio()
     hud_bridge.notificar(
         state="idle",
@@ -1431,6 +1482,21 @@ def main():
     print("  JARVIS LOCAL -- 100%% offline  (%s)"
           % ("simulado" if simulado else "escuta contínua no microfone"))
     print("=" * 60)
+
+    combinacao = (os.getenv("ATALHO_INTERROMPER") or "ctrl+alt+space").strip()
+    if combinacao.lower() not in ("", "off", "nenhum"):
+        import atalho
+        ok, usada, era_reserva = atalho.registrar_com_reserva(
+            combinacao, interromper_fala)
+        if ok and era_reserva:
+            print("  atalho para interromper: %s  (%s ja estava em uso)"
+                  % (usada, combinacao))
+        elif ok:
+            print("  atalho para interromper: %s" % usada)
+        else:
+            # Nao e motivo para nao subir, mas nao pode falhar em silencio.
+            print("  [Atalho] nenhuma combinacao livre (%s); defina uma em "
+                  "ATALHO_INTERROMPER no .env" % usada)
 
     t0 = time.perf_counter()
     anunciar_microfone()

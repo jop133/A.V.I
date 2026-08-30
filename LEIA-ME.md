@@ -62,6 +62,39 @@ Só a leitura de tela, isolada:
 .\.venv\Scripts\python.exe percepcao.py
 ```
 
+## Interromper a fala
+
+`Ctrl+Shift+Espaço` corta a fala na hora. Configurável em `ATALHO_INTERROMPER`
+no `.env`; `off` desliga.
+
+O histórico guarda **só o que você chegou a ouvir**, não a resposta que ele
+pretendia dar — senão, no turno seguinte, ele acharia que disse coisas que
+você nunca ouviu.
+
+**Por que atalho e não barge-in por voz.** O caminho natural seria manter o
+microfone aberto durante a fala e cortar quando você falasse por cima. Medido
+nesta máquina:
+
+```
+sala em silêncio        pico RMS   142
+você falando            pico RMS   263
+ELE falando (retorno
+dos alto-falantes)      pico RMS  1131      ← limiar de fala: 180
+```
+
+O microfone escuta os alto-falantes **mais alto que você**. Nenhum ajuste de
+limiar separa os dois, então barge-in por voz faria ele se interromper sozinho
+a cada frase. Com fones o problema não existe — `--doutor` mede o retorno da
+sua máquina e diz o veredito.
+
+Resolver isso de verdade com alto-falantes exige cancelamento de eco acústico:
+filtro adaptativo com alinhamento de latência contra o sinal de referência. É
+um projeto próprio, não um item de roteiro.
+
+**Se a combinação estiver ocupada**, ele avisa e cai para uma reserva. Vale
+saber que os candidatos "óbvios" costumam estar tomados — nesta máquina,
+`ctrl+alt+space` e `ctrl+shift+j` já pertenciam a outros programas.
+
 ## Quando algo parecer quebrado, rode o doutor primeiro
 
 ```powershell

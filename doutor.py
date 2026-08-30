@@ -217,6 +217,32 @@ def checar_eco(r, jarvis):
                 % (eco, jarvis.VAD_LIMIAR))
 
 
+def checar_atalho(r):
+    """O atalho de interromper consegue ser registrado nesta maquina?
+
+    Vale checar porque RegisterHotKey e exclusivo no sistema: se outro
+    programa ja tem a combinacao, o Jarvis sobe sem poder ser interrompido.
+    Medido aqui, ctrl+alt+space e ctrl+shift+j -- os candidatos mais obvios --
+    ja estavam tomados.
+    """
+    import atalho
+    r.secao("Atalho para interromper a fala")
+    pedida = (os.getenv("ATALHO_INTERROMPER") or "ctrl+shift+space").strip()
+    if pedida.lower() in ("off", "nenhum", ""):
+        r.anota(AVISO, "atalho", "desligado no .env",
+                "sem ele nao ha como cortar a fala do Jarvis")
+        return
+    ok, usada, reserva = atalho.registrar_com_reserva(pedida, lambda: None)
+    if ok and reserva:
+        r.anota(AVISO, "atalho", "%s em uso; cairia para %s" % (pedida, usada),
+                "escolha uma combinacao livre em ATALHO_INTERROMPER")
+    elif ok:
+        r.anota(OK, "atalho", usada)
+    else:
+        r.anota(FALHA, "atalho", "nenhuma combinacao livre (%s)" % usada,
+                "defina uma que nao esteja em uso em ATALHO_INTERROMPER")
+
+
 # ---------------------------------------------------------------------- cerebro
 
 def checar_ollama(r, jarvis):
@@ -415,6 +441,7 @@ def rodar(rapido=False):
     checar_microfone(r, jarvis)
     if not rapido:
         checar_eco(r, jarvis)
+    checar_atalho(r)
     checar_ollama(r, jarvis)
     checar_ferramentas(r, jarvis)
     checar_percepcao(r, percepcao)
