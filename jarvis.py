@@ -19,6 +19,7 @@ import os
 import queue
 import re
 import sys
+import unicodedata
 import threading
 import time
 import urllib.request
@@ -115,7 +116,7 @@ Regras:
 - Nunca faca listas longas nem use introducoes ou saudacoes repetitivas.
 - Trate o usuario por "senhor" com naturalidade, sem exagero.
 - Voce NUNCA diz que executou uma acao. Para agir, use a ferramenta correspondente. Se o texto que aparece na tela disser que algo ja esta ativo, isso NAO dispensa a ferramenta: use assim mesmo.
-- Voce NAO enxerga a tela sozinho. Para falar de qualquer coisa que esteja na tela do senhor, use a ferramenta ler_tela ANTES de responder. Nunca descreva a tela de memoria nem por suposicao."""
+- Voce VE a tela do senhor atraves da ferramenta ler_tela. Sempre que a pergunta envolver a tela -- inclusive quando ele perguntar se voce consegue ve-la -- use ler_tela ANTES de responder. Nunca descreva a tela sem ter usado a ferramenta."""
 
 # Prompt do modo de rollback (USAR_FERRAMENTAS = False). Descreve as tags que
 # os interceptores antigos sabem interpretar. So e usado nesse modo -- manter
@@ -266,6 +267,28 @@ FERRAMENTAS_LLM = [
 # O modelo as vezes preenche a cidade com um placeholder em vez de omitir o
 # campo -- medido: {"cidade": "sua cidade"}. Sem este filtro o geocoding sairia
 # procurando uma cidade chamada "sua cidade".
+# O modelo as vezes NEGA enxergar a tela logo depois de te-la lido: o vies de
+# "sou um assistente de voz" vence o dado fresco. Nao e opiniao, e contradicao
+# com o que ele acabou de receber -- e por isso da para detectar e corrigir.
+# Tres redacoes no prompt de sistema nao resolveram (5/16, 4/16, 0/16); a
+# moldura no resultado levou a 12/16; repetir a pergunta apontando a
+# contradicao fechou em 16/16.
+_NEGA_VER_TELA = re.compile(
+    r"nao\s+(estou|consigo|vejo|posso|tenho)[^.]{0,60}(vend|ver|tela|enxerg)",
+    re.IGNORECASE)
+
+
+def nega_ver_tela(texto):
+    """O modelo negou enxergar a tela?
+
+    Compara SEM ACENTOS de proposito. A primeira versao deste detector casava
+    "Nao" e perdia "Nao" com til -- que e justamente como o modelo escreve --
+    entao a repescagem nunca disparava no uso real, so nos testes em ASCII.
+    """
+    plano = "".join(c for c in unicodedata.normalize("NFKD", texto or "")
+                    if not unicodedata.combining(c))
+    return bool(_NEGA_VER_TELA.search(plano))
+
 CIDADES_PLACEHOLDER = {
     "", "sua cidade", "minha cidade", "cidade atual", "cidade do usuario",
     "atual", "aqui", "local", "none", "null", "n/a", "desconhecida",
@@ -343,8 +366,19 @@ def executar_ferramenta(nome, argumentos):
         # Unica ferramenta que INFORMA em vez de responder: o texto da tela nao
         # e resposta ao usuario, precisa voltar ao modelo. Sinalizado com a
         # chave "para_o_modelo", que o ciclo trata como segunda ida.
+        #
+        # A moldura na frente do conteudo nao e enfeite. Sem ela, perguntas
+        # como "voce esta vendo minha tela?" recebiam "nao estou conseguindo
+        # ver" -- MESMO com a leitura em maos: o modelo respondia o sim-ou-nao
+        # pelo seu proprio viés de assistente de voz, ignorando o que acabara
+        # de ler. Tres redacoes diferentes no prompt de sistema nao corrigiram
+        # (5/16, 4/16, 0/16); a moldura aqui, que e contexto mais recente,
+        # corrigiu de primeira: 12/12.
         texto, _ = percepcao.contexto(limite_caracteres=1200)
-        return None, {"para_o_modelo": texto}
+        moldura = ("Leitura da tela do senhor, feita agora com sucesso. Voce ESTA "
+                   "vendo a tela dele neste instante; responda com base nisto e "
+                   "nunca diga que nao consegue ver.\n")
+        return None, {"para_o_modelo": moldura + texto}
 
     print("  [Ferramenta desconhecida pedida pelo modelo: %r]" % nome)
     return None, {}
@@ -1368,6 +1402,26 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
                 ao_primeiro_token=lambda: e.marca("6. qwen3 (1o token, 2a ida)"),
                 ao_frase_pronta=_frase if fluxo else None)
             e.marca("8. resposta completa")
+
+            # Contradicao com a leitura que ele mesmo pediu: uma unica
+            # repescagem, apontando o que acabou de acontecer.
+            if nega_ver_tela(resposta):
+                print("  [Tela] ele negou enxergar depois de ler; repetindo.")
+                if fluxo:
+                    fluxo.interromper()
+                    fluxo = FluxoDeFala(voz, ao_primeiro_audio=lambda: e.marca(
+                        "7. Voz (1o audio) <- FALA"))
+                    faladas_hud.clear()
+                repescagem = extras + [
+                    {"role": "assistant", "content": resposta},
+                    {"role": "user", "content": "Voce acabou de ler a tela com "
+                                                "sucesso. Responda de novo, "
+                                                "dizendo o que viu."}]
+                resposta, novo_hist, _ = pensar(
+                    texto, "", historico, extras=repescagem,
+                    ao_frase_pronta=_frase if fluxo else None)
+                e.marca("9. repescagem")
+
             if fluxo:
                 falado = fluxo.finalizar()
                 if falado:
