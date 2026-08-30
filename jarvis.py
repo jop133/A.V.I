@@ -7,6 +7,7 @@ isto substitui a nuvem nao e a qualidade bruta: e o tempo ate a primeira palavra
 
 Modos:
     python jarvis.py --simulado    usa fala sintetica (nao precisa do microfone)
+    python jarvis.py --doutor      autodiagnostico e sai (--rapido pula som e janelas)
     python jarvis.py               usa o microfone de verdade
 """
 
@@ -1348,6 +1349,13 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
 
 
 def main():
+    if "--doutor" in sys.argv:
+        # Autodiagnostico: diz EM QUE CAMADA algo esta falhando, em vez de
+        # deixar microfone mudo, HUD travada e modelo fora do ar produzirem
+        # todos o mesmo sintoma ("ele nao respondeu").
+        import doutor
+        sys.exit(doutor.rodar(rapido="--rapido" in sys.argv))
+
     simulado = "--simulado" in sys.argv
     sem_hud = "--sem-hud" in sys.argv
 

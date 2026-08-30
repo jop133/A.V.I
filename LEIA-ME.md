@@ -62,6 +62,22 @@ Só a leitura de tela, isolada:
 .\.venv\Scripts\python.exe percepcao.py
 ```
 
+## Quando algo parecer quebrado, rode o doutor primeiro
+
+```powershell
+.\.venv\Scripts\python.exe jarvis.py --doutor
+```
+
+Microfone mudo, HUD travada e modelo fora do ar produzem **o mesmo sintoma**
+para quem está falando: "ele não respondeu". O doutor separa isso em ~30s, em
+31 checagens: dispositivo de áudio e nível captado, retorno acústico dos
+alto-falantes, Ollama e tempo até o 1º token, roteamento das ferramentas,
+leitura de tela, os três motores de voz, as APIs externas, o token da ponte e
+as três interfaces abrindo de fato.
+
+Cada falha vem com o conserto ao lado. `--rapido` pula as duas partes barulhentas
+(o teste de eco toca som, o de interfaces abre e fecha janelas).
+
 ## Latência medida (28/ago/2026)
 
 Do instante em que você **para de falar** até ouvir a primeira palavra dele,
