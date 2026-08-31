@@ -1114,6 +1114,36 @@ class Ouvido:
 
 # --------------------------------------------------------------------- cerebro
 
+def evitar_eco(historico):
+    """Remove do historico uma resposta REPETIDA, junto da pergunta dela.
+
+    Duas respostas identicas seguidas ensinam o modelo a repetir. Medido com a
+    descricao de tela que o usuario relatou:
+
+        historico limpo                 0 de 6 desvios
+        com UMA descricao de tela       0 de 6
+        com DUAS descricoes identicas   5 de 6  <- responde a tela para
+                                                   QUALQUER pergunta
+
+    E acontece sozinho: pergunta-se duas vezes sobre a tela, a tela nao mudou,
+    ele da a mesma resposta -- e a partir dai fica presa nela.
+
+    Fica a copia MAIS ANTIGA, com a pergunta original. Qual das duas guardar
+    nao e detalhe: medido, guardar a mais nova PIORA (6 de 6), porque a
+    pergunta recente costuma ser vaga ("e agora?") e o par
+    "pergunta vaga -> descricao da tela" ensina justamente a responder
+    qualquer coisa com a tela. Guardando a antiga, o par continua sendo
+    "o que tem na minha tela? -> descricao", que e especifico: 0 de 6.
+    """
+    if len(historico) < 4:
+        return historico
+    ultima, anterior = historico[-1], historico[-3]
+    if (ultima.get("role") == "assistant" and anterior.get("role") == "assistant"
+            and ultima.get("content") and ultima["content"] == anterior["content"]):
+        return historico[:-2]
+    return historico
+
+
 def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None,
            ao_frase_pronta=None, extras=None):
     """qwen3 local, via /api/chat com historico explicito de mensagens.
@@ -1642,6 +1672,7 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
                 voz.falar(resposta)
             if novo_hist and novo_hist[-1].get("role") == "assistant":
                 novo_hist[-1]["content"] = resposta
+                novo_hist = evitar_eco(novo_hist)
             registrar_na_transcricao(texto, resposta)
             e.relatorio()
             hud_bridge.notificar(state="idle", benchmarks=e.resumo())
@@ -1719,6 +1750,7 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
     # ate perguntas que ele responde sozinho ("capital da Franca").
     if novo_hist and novo_hist[-1].get("role") == "assistant":
         novo_hist[-1]["content"] = resposta
+        novo_hist = evitar_eco(novo_hist)
 
     FALA_EM_CURSO = None
     registrar_na_transcricao(texto, resposta)

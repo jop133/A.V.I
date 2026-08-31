@@ -195,6 +195,42 @@ um projeto próprio, não um item de roteiro.
 saber que os candidatos "óbvios" costumam estar tomados — nesta máquina,
 `ctrl+alt+space` e `ctrl+shift+j` já pertenciam a outros programas.
 
+## Ele repetindo a mesma resposta errada
+
+Sintoma relatado: perguntas sem relação recebiam sempre a mesma resposta — uma
+descrição da tela — e o log mostrava várias linhas de "áudio obtido do cache".
+
+**O cache não era a causa.** Ele é de *áudio*, indexado pelo texto exato:
+`texto → PCM`. Não escolhe palavras, só evita re-sintetizar uma frase já dita.
+As linhas de cache eram **consequência** de ele repetir a mesma resposta, não
+o motivo.
+
+A causa está no histórico. Medido:
+
+```
+histórico limpo                      0 de 6 desvios
+com UMA descrição de tela            0 de 6
+com DUAS descrições idênticas        5 de 6   ← responde a tela
+                                                para QUALQUER pergunta
+```
+
+**Duas respostas idênticas seguidas ensinam o modelo a repetir.** E isso
+acontece sozinho: você pergunta duas vezes sobre a tela, a tela não mudou, ele
+dá a mesma resposta — e a partir dali fica preso nela.
+
+`evitar_eco()` colapsa a repetição guardando **a cópia mais antiga**. Qual das
+duas guardar não é detalhe:
+
+```
+guardando a mais NOVA      6 de 6   ← pior que o bug original
+guardando a mais ANTIGA    0 de 6
+```
+
+A pergunta recente costuma ser vaga ("e agora?"), e o par *"pergunta vaga →
+descrição da tela"* ensina justamente a responder qualquer coisa com a tela.
+Guardando a antiga, o par continua sendo *"o que tem na minha tela? →
+descrição"*, que é específico.
+
 ## Se ele parar de responder
 
 Dois sintomas relatados no uso real tinham a mesma raiz: **a fala travando**.
