@@ -22,6 +22,7 @@ import sys
 import unicodedata
 import threading
 import time
+import traceback
 import urllib.request
 from pathlib import Path
 
@@ -757,6 +758,7 @@ class FluxoDeFala:
         self.faladas = []
         self.erros = []
         self.interrompido = threading.Event()
+        self.frase_em_sintese = None      # so para o aviso de travamento nomear
         self._t_sintese = threading.Thread(target=self._laco_sintese, daemon=True)
         self._t_toque = threading.Thread(target=self._laco_toque, daemon=True)
         self._t_sintese.start()
@@ -780,6 +782,11 @@ class FluxoDeFala:
                     fila.get_nowait()
                 except queue.Empty:
                     break
+        # Esvaziar as filas tira tambem o None que encerra os lacos: sem
+        # repo-lo, a thread de reproducao ficaria presa para sempre no get()
+        # -- exatamente o que este metodo deveria estar resolvendo.
+        self.fila_texto.put(None)
+        self.fila_audio.put(None)
         try:
             sd.stop()
         except Exception:
@@ -794,7 +801,9 @@ class FluxoDeFala:
             if self.interrompido.is_set():
                 continue
             try:
+                self.frase_em_sintese = frase
                 pcm, taxa = self.voz.sintetizar(frase)
+                self.frase_em_sintese = None
                 tratado = presenca.tratar(pcm, taxa, reverb=SALA_REVERB,
                                           graves=SALA_GRAVES,
                                           compressao=SALA_COMPRESSAO)
@@ -829,11 +838,40 @@ class FluxoDeFala:
                 self.erros.append(e)
                 print(f"  [Voz: falha ao reproduzir -- {e}]")
 
-    def finalizar(self, timeout=120):
-        """Espera tudo que ja foi enfileirado terminar de tocar."""
+    def finalizar(self, timeout=20):
+        """Espera o que foi enfileirado terminar de tocar, dentro de um PRAZO.
+
+        O prazo e TOTAL, compartilhado pelos dois joins. Antes eram 120s para
+        cada um, em serie: uma sintese pendurada congelava o Jarvis por ate
+        QUATRO MINUTOS -- exatamente entre o "Jarvis (Local):" e o relatorio de
+        etapas, que e onde os travamentos relatados paravam.
+
+        Pior ainda, as threads sobreviviam ao timeout. O turno seguinte criava
+        um fluxo NOVO com o antigo ainda vivo, e dois lacos passavam a chamar
+        sd.play e sd.wait no mesmo PortAudio -- a explicacao mais provavel para
+        o microfone parar de funcionar depois de uma fala travada.
+
+        Por isso, ao estourar o prazo, ele CORTA: o interromper() faz sd.stop(),
+        que desbloqueia um sd.wait() preso, e esvazia as filas para as threads
+        saírem em vez de tocarem audio atrasado no meio do proximo turno.
+        """
+        prazo = time.time() + timeout
         self.fila_texto.put(None)
-        self._t_sintese.join(timeout=timeout)
-        self._t_toque.join(timeout=timeout)
+        for thread in (self._t_sintese, self._t_toque):
+            thread.join(timeout=max(0.1, prazo - time.time()))
+
+        presas = []
+        if self._t_sintese.is_alive():
+            presas.append("sintese de %r" % (self.frase_em_sintese or "?")[:44])
+        if self._t_toque.is_alive():
+            presas.append("reproducao do audio")
+        if presas:
+            print("  [Voz] AVISO: %s nao respondeu em %ds -- cortando a fala."
+                  % (" e ".join(presas), timeout))
+            print("        (motor: %s; se repetir, troque MOTOR_VOZ para 'piper')"
+                  % MOTOR_VOZ)
+            self.interromper()
+
         return " ".join(self.faladas).strip()
 
 
@@ -944,7 +982,9 @@ class Voz:
                     "sample_rate": CARTESIA_TAXA
                 }
             },
-            timeout=30
+            # 8s e nao 30: se a Cartesia esta lenta, e melhor cair para o Edge
+            # (4,5s) e depois para o Piper local do que ficar meio minuto mudo.
+            timeout=8
         )
         if r.status_code != 200:
             raise RuntimeError(f"Cartesia HTTP {r.status_code}: {r.text[:100]}")
@@ -1360,9 +1400,21 @@ def escutar(ouvido, limite=25.0):
     adiantada = None          # ((thread, saida), marca de ultimo_som no disparo)
 
     pico_rms = 0.0
-    with sd.RawInputStream(samplerate=TAXA_MIC, channels=1, dtype="int16",
-                           blocksize=BLOCO, callback=cb,
-                           device=DISPOSITIVO_MIC):
+    try:
+        entrada = sd.RawInputStream(samplerate=TAXA_MIC, channels=1, dtype="int16",
+                                    blocksize=BLOCO, callback=cb,
+                                    device=DISPOSITIVO_MIC)
+    except Exception as erro:
+        # Acontece depois de uma fala travada: o PortAudio fica em estado ruim
+        # e recusa abrir a entrada. Antes isso subia como excecao e matava o
+        # laco -- o sintoma era "ele parou de me ouvir", sem explicacao.
+        print("  [Microfone] nao consegui abrir a entrada: %r" % (erro,))
+        print("              tentando de novo no proximo ciclo; se insistir, "
+              "rode 'jarvis.py --doutor'")
+        time.sleep(1.0)
+        return b"", None
+
+    with entrada:
         inicio = time.time()
         print("  (ouvindo microfone...)")
         hud_bridge.notificar(state="listening")
@@ -1750,13 +1802,31 @@ def main():
     else:
         print("Assistente pronto. Fale no microfone a qualquer momento.")
         print("Pressione Ctrl+C para encerrar.")
+        falhas_seguidas = 0
         while True:
             print("=" * 60)
-            pcm, texto_adiantado = escutar(ouvido)
-            if duracao_segundos(pcm) < 0.4:
-                continue
-            historico = ciclo(ouvido, voz, pcm, TAXA_MIC, historico,
-                              texto_pronto=texto_adiantado)
+            try:
+                pcm, texto_adiantado = escutar(ouvido)
+                if duracao_segundos(pcm) < 0.4:
+                    continue
+                historico = ciclo(ouvido, voz, pcm, TAXA_MIC, historico,
+                                  texto_pronto=texto_adiantado)
+                falhas_seguidas = 0
+            except KeyboardInterrupt:
+                raise
+            except Exception as erro:
+                # Um turno que da errado nao pode derrubar o Jarvis. Antes,
+                # qualquer excecao aqui subia ate o topo e encerrava o
+                # processo -- o que, para quem esta falando, e indistinguivel
+                # de "ele parou de me ouvir".
+                falhas_seguidas += 1
+                print("  [ERRO] o turno falhou: %r" % (erro,))
+                traceback.print_exc()
+                if falhas_seguidas >= 3:
+                    print("  [ERRO] %d turnos seguidos falharam. Rode "
+                          "'jarvis.py --doutor' para ver em que camada esta o "
+                          "problema." % falhas_seguidas)
+                    time.sleep(2.0)
             print()
 
 

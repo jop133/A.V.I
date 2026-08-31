@@ -195,6 +195,41 @@ um projeto próprio, não um item de roteiro.
 saber que os candidatos "óbvios" costumam estar tomados — nesta máquina,
 `ctrl+alt+space` e `ctrl+shift+j` já pertenciam a outros programas.
 
+## Se ele parar de responder
+
+Dois sintomas relatados no uso real tinham a mesma raiz: **a fala travando**.
+
+O `FluxoDeFala.finalizar()` esperava a síntese e a reprodução com **120s cada,
+em série** — até **4 minutos** de Jarvis congelado se uma das duas pendurasse.
+E o pior: as threads sobreviviam ao timeout, então o turno seguinte criava um
+fluxo novo com o antigo ainda vivo, e duas threads passavam a chamar
+`sd.play`/`sd.wait` no mesmo PortAudio. É a explicação mais provável para o
+microfone parar de funcionar depois de uma fala travada.
+
+O sintoma no terminal era característico: a linha `Jarvis (Local): ...` saía,
+e o **relatório de etapas nunca vinha** — porque ele trava exatamente entre os
+dois.
+
+Agora o prazo é **total, compartilhado** (20s), e ao estourar ele **corta**:
+`sd.stop()` desbloqueia um `sd.wait()` preso e as filas são esvaziadas. E o
+aviso diz **onde** travou:
+
+```
+[Voz] AVISO: sintese de 'Senhor, posso ajustar o brilho...' nao respondeu
+      em 20s -- cortando a fala.
+      (motor: cartesia; se repetir, troque MOTOR_VOZ para 'piper')
+```
+
+Um detalhe que só apareceu testando: esvaziar as filas tirava também o `None`
+que encerra os laços — o conserto deixava a thread presa para sempre no `get()`,
+exatamente o que ele deveria resolver. O sinal é reposto depois de esvaziar.
+
+**Outras duas blindagens.** O timeout da Cartesia caiu de 30s para 8s: se ela
+está lenta, é melhor cair para o Edge e depois para o Piper local do que ficar
+meio minuto mudo. E o laço principal agora sobrevive a um turno que falha —
+antes, qualquer exceção encerrava o processo, o que para quem está falando é
+indistinguível de "ele parou de me ouvir".
+
 ## Quando algo parecer quebrado, rode o doutor primeiro
 
 ```powershell
