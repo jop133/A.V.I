@@ -29,3 +29,6 @@ vozes/cache/
 
 # Log de depuracao que a biblioteca uiautomation cria sozinha na raiz
 @AutomationLog.txt
+
+# Indice de busca da memoria: derivado do vault, refeito em segundos
+.memoria.db
