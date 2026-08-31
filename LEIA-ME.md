@@ -62,6 +62,38 @@ Só a leitura de tela, isolada:
 .\.venv\Scripts\python.exe percepcao.py
 ```
 
+## Acompanhar a tela continuamente
+
+Diga **"ativar leitura de tela"**. Ele passa a reamostrar a tela a cada 1,5s e
+manda a leitura junto de toda pergunta. **"desativar leitura de tela"** volta
+ao normal. `LEITURA_DE_TELA=on` no `.env` já sobe ligado.
+
+Existe porque a leitura sob demanda falha em conversa encadeada: perguntada a
+segunda vez ("e o que tem nela?"), o modelo não relia e preenchia as lacunas
+com invenção.
+
+**Ficar de olho é praticamente de graça** — 122 ms por amostra e **0,0% de um
+núcleo** a cada 1,5s. O que custa é mandar a leitura ao modelo, e por isso o
+modo é explícito e desligado por padrão:
+
+| | desligado | ligado |
+|---|---|---|
+| conversa comum | 2,1s | ~3,1s |
+| pergunta sobre a tela | 4,6s | **~2,5s** |
+| 1º token | 0,24s | 1,42s |
+
+Perguntas sobre a tela ficam **mais rápidas** ligado, porque some a segunda ida
+ao modelo. Conversa comum fica ~1s mais lenta, porque o bloco volta a ser
+prefill de todo turno — é o custo que a `ler_tela` tinha eliminado, e você
+decide quando pagá-lo.
+
+Verificado com o modo ligado: **15/15** no roteamento das ferramentas (a
+ordem "pergunta antes, tela depois" segura) e **7/7** nas frases de voz que
+ligam e desligam.
+
+A HUD mostra "Acompanhando sua tela" enquanto estiver ativo, para você nunca
+ficar em dúvida se ele está olhando.
+
 ## Interromper a fala
 
 `Ctrl+Shift+Espaço` corta a fala na hora. Configurável em `ATALHO_INTERROMPER`

@@ -31,8 +31,20 @@ import sounddevice as sd
 
 import percepcao
 import presenca
+import vigia
 import hud_bridge
 import ferramentas
+
+# O console do Windows abre em cp1252, que nao codifica boa parte do que
+# aparece numa tela real -- uma seta, um emoji, um traco longo. Como o Jarvis
+# IMPRIME o que leu e o que respondeu, um caractere desses derrubava o ciclo
+# inteiro com UnicodeEncodeError, no meio de um turno. Trocar por UTF-8 com
+# substituicao resolve na origem, para todos os prints.
+for _fluxo in (sys.stdout, sys.stderr):
+    try:
+        _fluxo.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
 BASE = Path(__file__).parent
 CACHE_VOZ = BASE / "vozes" / "cache"
@@ -238,6 +250,17 @@ FERRAMENTAS_LLM = [
             "required": ["modo"]}}},
 
     {"type": "function", "function": {
+        "name": "controlar_leitura_de_tela",
+        "description": "Liga ou desliga o modo em que o Jarvis acompanha a tela "
+                       "continuamente. Use quando o usuario pedir para ativar, "
+                       "desativar, ligar ou desligar a leitura de tela, o "
+                       "acompanhamento da tela ou o monitoramento da tela.",
+        "parameters": {"type": "object", "properties": {
+            "ligar": {"type": "boolean",
+                      "description": "true para ativar, false para desativar"}},
+            "required": ["ligar"]}}},
+
+    {"type": "function", "function": {
         "name": "ler_tela",
         "description": "Le o que esta na tela do usuario neste instante: janela "
                        "ativa, elemento sob o cursor e o texto visivel. Use "
@@ -362,6 +385,18 @@ def executar_ferramenta(nome, argumentos):
         return (ferramentas.obter_clima(cidade or None)
                 or "Nao consegui a previsao agora, senhor."), {}
 
+    if nome == "controlar_leitura_de_tela":
+        ligar = args.get("ligar")
+        if isinstance(ligar, str):
+            ligar = ligar.strip().lower() not in ("false", "0", "nao", "off")
+        if ligar:
+            novidade = vigia.VIGIA.ligar()
+            return ("Leitura de tela ativada, senhor. Estou acompanhando."
+                    if novidade else "A leitura de tela ja esta ativa, senhor."),                    {"watching": True}
+        mudou = vigia.VIGIA.desligar()
+        return ("Leitura de tela desativada, senhor."
+                if mudou else "A leitura de tela ja estava desligada, senhor."),                {"watching": False}
+
     if nome == "ler_tela":
         # Unica ferramenta que INFORMA em vez de responder: o texto da tela nao
         # e resposta ao usuario, precisa voltar ao modelo. Sinalizado com a
@@ -374,7 +409,9 @@ def executar_ferramenta(nome, argumentos):
         # de ler. Tres redacoes diferentes no prompt de sistema nao corrigiram
         # (5/16, 4/16, 0/16); a moldura aqui, que e contexto mais recente,
         # corrigiu de primeira: 12/12.
-        texto, _ = percepcao.contexto(limite_caracteres=1200)
+        texto, idade = vigia.VIGIA.atual()
+        if not texto:
+            texto, _ = percepcao.contexto(limite_caracteres=1200)
         moldura = ("Leitura da tela do senhor, feita agora com sucesso. Voce ESTA "
                    "vendo a tela dele neste instante; responda com base nisto e "
                    "nunca diga que nao consegue ver.\n")
@@ -1320,8 +1357,15 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
     # No modo novo a tela NAO vai colada na pergunta: o modelo pede com a
     # ferramenta ler_tela quando precisa. Isso tira 0,95s do 1o token de todo
     # turno e some com a origem das quatro armadilhas de prompt do LEIA-ME.
-    contexto_tela = "" if TELA_COMO_FERRAMENTA else percepcao.contexto(
-        limite_caracteres=1200)[0]
+    if not TELA_COMO_FERRAMENTA:
+        contexto_tela = percepcao.contexto(limite_caracteres=1200)[0]
+    elif vigia.VIGIA.ligado:
+        # Modo de acompanhamento: a leitura ja esta pronta e vai junto da
+        # pergunta, sem a segunda ida ao modelo. E o que conserta a pergunta
+        # encadeada ("e o que tem nela?"), que antes nao relia e inventava.
+        contexto_tela = vigia.VIGIA.atual()[0]
+    else:
+        contexto_tela = ""
     e.marca("2. contexto de tela (UI Automation)")
 
     j_info = percepcao.janela_ativa()
@@ -1537,7 +1581,13 @@ def main():
           % ("simulado" if simulado else "escuta contínua no microfone"))
     print("=" * 60)
 
-    combinacao = (os.getenv("ATALHO_INTERROMPER") or "ctrl+alt+space").strip()
+    if (os.getenv("LEITURA_DE_TELA") or "").strip().lower() in ("on", "1", "sim", "true"):
+        vigia.VIGIA.ligar()
+        print("  leitura de tela: ATIVA desde o boot (LEITURA_DE_TELA no .env)")
+
+    # ctrl+shift+space e nao ctrl+alt+space: o segundo ja estava tomado por
+    # outro programa nesta maquina, e e um dos candidatos mais disputados.
+    combinacao = (os.getenv("ATALHO_INTERROMPER") or "ctrl+shift+space").strip()
     if combinacao.lower() not in ("", "off", "nenhum"):
         import atalho
         ok, usada, era_reserva = atalho.registrar_com_reserva(

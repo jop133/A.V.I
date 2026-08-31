@@ -1024,6 +1024,18 @@ function handleJarvisEvent(data) {
         if (targetEl) targetEl.textContent = data.windowTitle.slice(0, 24).toUpperCase();
     }
 
+    // Acompanhamento de tela ligado/desligado: o usuario precisa saber, sem
+    // ter que perguntar, se o Jarvis esta olhando a tela dele agora.
+    if (typeof data.watching === 'boolean') {
+        document.body.classList.toggle('watching-screen', data.watching);
+        const rotulo = document.getElementById('status-label');
+        if (rotulo) {
+            rotulo.textContent = data.watching
+                ? 'Acompanhando sua tela · Jarvis Live'
+                : 'Watching 6 systems · Jarvis Live';
+        }
+    }
+
     if (data.action === 'transition_to_orb') {
         triggerVortexTransitionToOrb();
     }

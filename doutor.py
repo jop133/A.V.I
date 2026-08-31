@@ -317,7 +317,12 @@ def checar_ferramentas(r, jarvis):
 
 
 def checar_percepcao(r, percepcao):
+    import vigia
     r.secao("Leitura de tela")
+    r.anota(OK, "modo continuo",
+            "%s (LEITURA_DE_TELA=%s); ligavel por voz a qualquer momento"
+            % ("LIGADO" if vigia.VIGIA.ligado else "sob demanda",
+               (os.getenv("LEITURA_DE_TELA") or "off").strip()))
     try:
         percepcao.contexto()                      # acorda a arvore do Chromium
         texto, ms = percepcao.contexto(limite_caracteres=1200)
