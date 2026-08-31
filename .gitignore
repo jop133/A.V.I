@@ -26,3 +26,6 @@ vozes/cache/
 
 # Log de falhas ao abrir as interfaces (diagnostico local)
 .interface_erros.log
+
+# Log de depuracao que a biblioteca uiautomation cria sozinha na raiz
+@AutomationLog.txt
