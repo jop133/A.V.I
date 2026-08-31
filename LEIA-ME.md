@@ -195,6 +195,41 @@ um projeto próprio, não um item de roteiro.
 saber que os candidatos "óbvios" costumam estar tomados — nesta máquina,
 `ctrl+alt+space` e `ctrl+shift+j` já pertenciam a outros programas.
 
+## Quando ele se recusa a responder algo trivial
+
+Perguntado *"você consegue me listar as suas funcionalidades?"*, ele respondia
+**"Não, senhor."** — consistentemente, 8 de 8.
+
+A causa era uma regra do próprio prompt: *"Nunca faça listas longas"*. Você
+pede uma lista, ele foi instruído a não fazer listas, e recusa.
+
+**O modelo despistou o diagnóstico.** O motivo que ele dava era outro:
+
+> *"Não, senhor. Para listar minhas funcionalidades, preciso primeiro ver o que
+> está na tela."*
+
+Isso aponta para a regra da `ler_tela`. Medindo com cada regra removida:
+
+```
+prompt atual              recusa 8/8
+sem a regra da TELA       recusa 8/8   ← não era essa
+sem a regra de LISTAS     recusa 1/8   ← era essa
+```
+
+A explicação que o modelo dá para o próprio comportamento é racionalização, não
+causa. Vale lembrar disso: aqui, seguir o motivo declarado teria levado a mexer
+na regra errada.
+
+Apagar a regra não servia — lista longa em conversa por voz é insuportável. A
+redação que resolve mantém a restrição e proíbe a recusa:
+
+> *"Evite listas longas e saudações repetitivas. Se o senhor pedir uma lista,
+> cite as principais em uma frase — NUNCA se recuse a responder por causa da
+> brevidade."*
+
+Recusa 0/12 nas medições de calibração, e as respostas comuns continuam do
+mesmo tamanho (28 caracteres contra 27).
+
 ## Ele repetindo a mesma resposta errada
 
 Sintoma relatado: perguntas sem relação recebiam sempre a mesma resposta — uma
