@@ -24,6 +24,7 @@ BANCO = BASE / ".memoria.db"          # derivado; fica FORA do vault
 NOTA_SEMPRE = "_sempre.md"            # sempre no prompt
 PASTA_DO_JARVIS = "jarvis"            # a única onde ele escreve
 TETO_SEMPRE = 3000                    # caracteres; acima disso ele avisa
+_PREPARADOS = set()                   # vaults cuja estrutura ja foi criada
 
 # Palavras que não ajudam a discriminar nada em português.
 _VAZIAS = {
@@ -45,6 +46,9 @@ def caminho_vault():
     """Pasta das notas, vinda do .env. Cria a estrutura se ainda não existir."""
     bruto = (os.getenv("VAULT") or "").strip()
     vault = Path(bruto) if bruto else Path.home() / "Jarvis" / "vault"
+    if vault in _PREPARADOS:          # so cria a estrutura na primeira vez;
+        return vault                  # isto e chamado a cada turno
+    _PREPARADOS.add(vault)
     try:
         (vault / PASTA_DO_JARVIS).mkdir(parents=True, exist_ok=True)
         sempre = vault / NOTA_SEMPRE
@@ -87,6 +91,12 @@ def indexar(vault=None):
 
         for arq in vault.rglob("*.md"):
             rel = str(arq.relative_to(vault))
+            # O _sempre.md ja vai no prompt de TODA conversa: indexa-lo faria
+            # a busca devolver o que o modelo ja tem, e pior -- ele casava com
+            # perguntas que nao sao de memoria ("que horas sao?"), virando os
+            # unicos falsos positivos da medicao.
+            if rel == NOTA_SEMPRE:
+                continue
             no_disco.add(rel)
             try:
                 mtime = arq.stat().st_mtime

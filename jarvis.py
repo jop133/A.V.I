@@ -29,6 +29,7 @@ import numpy as np
 import requests
 import sounddevice as sd
 
+import memoria
 import percepcao
 import presenca
 import vigia
@@ -128,6 +129,7 @@ Regras:
 - Nunca faca listas longas nem use introducoes ou saudacoes repetitivas.
 - Trate o usuario por "senhor" com naturalidade, sem exagero.
 - Voce NUNCA diz que executou uma acao. Para agir, use a ferramenta correspondente. Se o texto que aparece na tela disser que algo ja esta ativo, isso NAO dispensa a ferramenta: use assim mesmo.
+- Sobre fatos PESSOAIS do senhor (preferencias, historico, coisas que ele te contou): so afirme o que estiver nas anotacoes que voce recebeu. Se nao houver anotacao, diga que nao tem isso registrado e ofereca anotar. NUNCA invente um fato sobre ele.
 - Voce VE a tela do senhor atraves da ferramenta ler_tela. Sempre que a pergunta envolver a tela -- inclusive quando ele perguntar se voce consegue ve-la -- use ler_tela ANTES de responder. Nunca descreva a tela sem ter usado a ferramenta."""
 
 # Prompt do modo de rollback (USAR_FERRAMENTAS = False). Descreve as tags que
@@ -248,6 +250,17 @@ FERRAMENTAS_LLM = [
         "parameters": {"type": "object", "properties": {
             "modo": {"type": "string", "enum": ["orbe", "bordas", "completo"]}},
             "required": ["modo"]}}},
+
+    {"type": "function", "function": {
+        "name": "anotar_na_memoria",
+        "description": "Guarda um fato nas anotacoes de longo prazo. Use quando o "
+                       "senhor pedir para anotar, lembrar ou nao esquecer algo.",
+        "parameters": {"type": "object", "properties": {
+            "assunto": {"type": "string",
+                        "description": "titulo curto, ex: 'pizzaria' ou 'preferencias'"},
+            "fato": {"type": "string",
+                     "description": "o que guardar, em uma frase"}},
+            "required": ["assunto", "fato"]}}},
 
     {"type": "function", "function": {
         "name": "controlar_leitura_de_tela",
@@ -384,6 +397,16 @@ def executar_ferramenta(nome, argumentos):
             cidade = ""
         return (ferramentas.obter_clima(cidade or None)
                 or "Nao consegui a previsao agora, senhor."), {}
+
+    if nome == "anotar_na_memoria":
+        assunto = str(args.get("assunto") or "").strip()
+        fato = str(args.get("fato") or "").strip()
+        if not assunto or not fato:
+            return "Nao entendi o que era para guardar, senhor.", {}
+        caminho = memoria.anotar(assunto, fato)
+        if not caminho:
+            return "Nao consegui gravar a anotacao, senhor.", {}
+        return "Anotado em %s, senhor." % assunto, {}
 
     if nome == "controlar_leitura_de_tela":
         ligar = args.get("ligar")
@@ -1018,6 +1041,12 @@ def pensar(pergunta, contexto_tela, historico, ao_primeiro_token=None,
 
     anteriores = list(historico or [])[-(MAX_TURNOS_HISTORICO * 2):]
     sistema = SISTEMA if USAR_FERRAMENTAS else SISTEMA_LEGADO
+    # O _sempre.md e ESTAVEL entre turnos, entao entra no prefixo que o Ollama
+    # cacheia: medido, 2.000 caracteres estaveis custam +0,04s, contra +0,95s
+    # de um bloco do mesmo tamanho que mudasse a cada turno.
+    lembretes = memoria.sempre()
+    if lembretes:
+        sistema += "\n\nO QUE VOCE JA SABE SOBRE O SENHOR:\n" + lembretes
     mensagens = ([{"role": "system", "content": sistema}]
                  + anteriores
                  + [{"role": "user", "content": conteudo}]
@@ -1399,6 +1428,24 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
         hud_bridge.notificar(state="speaking", jarvisSpeech=" ".join(faladas_hud))
         fluxo.dizer(f)
 
+    # --- memoria: busca automatica, nao por escolha do modelo ---
+    #
+    # Deixar o modelo decidir NAO funcionou: medido, 6 de 18 perguntas de
+    # recordacao chamavam a ferramenta certa -- "qual e o meu monitor
+    # principal?" ia para a ler_tela, porque soa como tela. O FTS5 decide
+    # melhor: 5/6 acham a nota certa e 10/10 perguntas que nao sao de memoria
+    # nao acham NADA. Sem falso positivo, entao nao precisa nem de limiar.
+    #
+    # E o custo so aparece quando ha o que lembrar: turno sem acerto nao paga
+    # nada de prefill.
+    achados = memoria.buscar(texto, limite=2)
+    if achados:
+        linhas = ["[MEMORIA] Suas anotacoes sobre isto:"]
+        for titulo, _c, trecho, _n in achados:
+            linhas.append("- [%s] %s" % (titulo, " ".join(trecho.split())))
+        contexto_tela = ((contexto_tela + "\n\n") if contexto_tela else "")             + "\n".join(linhas)
+        print("  [MEMORIA] %d trecho(s) recuperado(s)" % len(achados))
+
     resposta, novo_hist, chamadas = pensar(
         texto, contexto_tela, historico,
         ao_primeiro_token=lambda: e.marca("3. qwen3 (1o token)"),
@@ -1601,6 +1648,13 @@ def main():
             # Nao e motivo para nao subir, mas nao pode falhar em silencio.
             print("  [Atalho] nenhuma combinacao livre (%s); defina uma em "
                   "ATALHO_INTERROMPER no .env" % usada)
+
+    novas, atualizadas, _ = memoria.indexar()
+    est = memoria.estatisticas()
+    print("  memoria: %d notas em %s%s"
+          % (est["notas"], est["vault"],
+             " (%d novas, %d atualizadas)" % (novas, atualizadas)
+             if novas or atualizadas else ""))
 
     t0 = time.perf_counter()
     anunciar_microfone()

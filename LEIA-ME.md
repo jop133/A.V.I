@@ -62,6 +62,45 @@ Só a leitura de tela, isolada:
 .\.venv\Scripts\python.exe percepcao.py
 ```
 
+## Memória entre sessões
+
+As notas ficam em `VAULT` (`.env`), fora do projeto: arquivos `.md` comuns, que
+você edita à mão ou no Obsidian — **opcional**, porque o Jarvis fala com a
+pasta, não com o aplicativo.
+
+```
+vault/
+  _sempre.md      ← vai no prompt de TODA conversa. curto, você cura
+  jarvis/         ← única pasta onde ele escreve
+```
+
+**A busca é automática, não uma ferramenta.** Isso foi decidido medindo:
+
+```
+o modelo escolhendo a ferramenta     6/18 perguntas de recordação
+busca por FTS5 na pergunta           5/6, e 10/10 ignoradas corretamente
+```
+
+"Qual é o meu monitor principal?" ia para a `ler_tela` — "monitor" soa como
+tela. O índice não se confunde com isso. E como não houve **nenhum** falso
+positivo em 10 perguntas comuns, não precisa nem de limiar de relevância: se o
+FTS5 achou algo, entra; senão, o turno não paga nada.
+
+**Por que FTS5 e não busca simples.** Além de ~240× mais rápida no mesmo
+volume, ela ordena por relevância (BM25) e devolve **um trecho**, não a nota
+inteira — e tudo que entra no prompt é pago a cada turno.
+
+**Duas armadilhas que a medição pegou:**
+
+O `_sempre.md` **não** entra no índice. Ele já vai no prompt sempre; buscá-lo
+devolvia o que o modelo já tinha e era a causa dos únicos falsos positivos
+("que horas são?" casava com ele).
+
+E o modelo **inventava** fatos pessoais quando não havia anotação: *"sua cor
+favorita é o rosa"*, sobre alguém que nunca disse isso. Uma regra explícita no
+prompt levou de **2/15 para 12/15** de respostas honestas, sem perder nada na
+recordação (6/6).
+
 ## Acompanhar a tela continuamente
 
 Diga **"ativar leitura de tela"**. Ele passa a reamostrar a tela a cada 1,5s e
