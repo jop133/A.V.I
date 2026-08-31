@@ -195,6 +195,48 @@ um projeto próprio, não um item de roteiro.
 saber que os candidatos "óbvios" costumam estar tomados — nesta máquina,
 `ctrl+alt+space` e `ctrl+shift+j` já pertenciam a outros programas.
 
+## Ele conversando sozinho
+
+Sintoma relatado: sem ninguém falar, ele "entendeu" **"Legendas pela comunidade
+de Amara.org"** e respondeu como se fosse pergunta — várias vezes seguidas.
+
+São duas causas empilhadas.
+
+**O limiar do VAD estava calibrado para outra sala.** Medido no ambiente real:
+
+```
+ruído ambiente        mediana 205 | p90 311 | pico 533
+VAD_LIMIAR fixo       180
+blocos de SILÊNCIO que passavam por fala    67%
+```
+
+**O Whisper alucina em cima de quase-silêncio.** Ele foi treinado com legendas,
+e no vazio devolve os créditos que mais viu nesses dados. Não é erro de áudio:
+é o modelo preenchendo o silêncio com o que aprendeu.
+
+Quatro consertos:
+
+**1 · O limiar é calibrado no boot**, medindo o ruído da sala. Ruído passando
+caiu de **67% para 3%**. O boot imprime o número, para você ver se ficou certo.
+
+**2 · Uma rede de segurança desfaz um limiar alto demais.** Se a calibração
+pegar um barulho passageiro, o limiar sobe e o Jarvis fica surdo — que é muito
+pior que ouvir demais. Oito turnos com som perto do limiar sem nunca virar fala
+e ele baixa sozinho, avisando.
+
+**3 · `vad_filter=True` no Whisper.** Descarta o que não é voz antes de
+transcrever: transcrições idênticas na fala real (4/4) e mesmo tempo (1,75s),
+mas **60× mais rápido em ruído puro** — 1,48s para 0,01s.
+
+**4 · Lista negra dos créditos conhecidos.** Última barreira para o que passar
+pelos outros três: "Amara.org", "obrigado por assistir", "inscreva-se no canal"
+e afins viram silêncio. Testado: 9/9, sem descartar fala de verdade.
+
+E o Piper passou a ser **pré-carregado no boot**. Ele é o último degrau da
+cadeia de voz — justamente o que roda quando os outros já falharam — e pagar
+2,9s de carga *depois* de esperar Cartesia e Edge estourava o orçamento de 20s
+da fala.
+
 ## Quando ele se recusa a responder algo trivial
 
 Perguntado *"você consegue me listar as suas funcionalidades?"*, ele respondia

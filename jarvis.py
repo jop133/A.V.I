@@ -1084,6 +1084,41 @@ class Voz:
         ), taxa
 
 
+# O Whisper foi treinado com legendas, e em silencio ou ruido ele devolve os
+# CREDITOS que apareciam nesses dados. Nao e erro de audio: e o modelo
+# preenchendo o vazio com o que viu mais vezes.
+#
+# Relatado no uso real: sem ninguem falar, ele "entendeu" "Legendas pela
+# comunidade de Amara.org" e respondeu como se fosse pergunta -- varias vezes
+# seguidas, porque o ruido da sala reabria o turno.
+ALUCINACOES_WHISPER = (
+    "legendas pela comunidade de amara.org",
+    "legendas pela comunidade",
+    "amara.org",
+    "obrigado por assistir",
+    "obrigada por assistir",
+    "inscreva-se no canal",
+    "ate a proxima",
+    "tchau tchau",
+    "subtitles by",
+    "subtitled by",
+    "www.mooji.org",
+)
+
+
+def descartar_alucinacao(texto):
+    """Devolve '' quando o texto e um credito de legenda em vez de fala."""
+    limpo = "".join(c for c in unicodedata.normalize("NFKD", texto or "")
+                    if not unicodedata.combining(c)).lower().strip(" .!?,")
+    if not limpo:
+        return ""
+    for marca in ALUCINACOES_WHISPER:
+        if marca in limpo:
+            print("  [Whisper] descartado como alucinacao: %r" % texto[:60])
+            return ""
+    return texto
+
+
 class Ouvido:
     """Whisper local: audio -> texto."""
 
@@ -1107,10 +1142,14 @@ class Ouvido:
             n = int(len(audio) * 16000 / taxa)
             audio = np.interp(np.linspace(0, len(audio), n),
                               np.arange(len(audio)), audio).astype(np.float32)
+        # vad_filter=True descarta os trechos sem voz ANTES de transcrever.
+        # Medido: transcricoes identicas na fala de verdade (4 de 4) e mesmo
+        # tempo (1,75s), mas 60x mais rapido em ruido puro (1,48s -> 0,01s).
+        # E e a defesa padrao contra a alucinacao do Whisper em silencio.
         segs, _ = self.modelo.transcribe(audio, language="pt", beam_size=1,
-                                         vad_filter=False,
+                                         vad_filter=True,
                                          condition_on_previous_text=False)
-        return " ".join(s.text for s in segs).strip()
+        return descartar_alucinacao(" ".join(s.text for s in segs).strip())
 
 # --------------------------------------------------------------------- cerebro
 
@@ -1342,6 +1381,38 @@ def anunciar_microfone():
         print("  microfone: nao consegui identificar (%s)" % e)
 
 
+# Quantos turnos com som audivel MAS abaixo do limiar antes de desconfiar que
+# o limiar subiu demais.
+TURNOS_ABAIXO_PARA_BAIXAR = 8
+_turnos_abaixo = 0
+
+
+def _vigiar_limiar_alto(pico_rms, houve_fala):
+    """Baixa o limiar se houver som audivel que nunca chega a virar fala.
+
+    A calibracao ajusta o limiar ao ruido da sala, mas se ela rodar durante um
+    barulho passageiro o limiar sobe demais -- e o Jarvis fica surdo, que e
+    MUITO pior que ouvir demais. Este vigia desfaz isso sozinho: som que
+    chegou perto do limiar varias vezes seguidas sem nunca cruza-lo e sinal de
+    que o limiar, e nao o usuario, esta errado.
+    """
+    global VAD_LIMIAR, _turnos_abaixo
+    if houve_fala or pico_rms < VAD_LIMIAR * 0.55:
+        _turnos_abaixo = 0
+        return
+
+    _turnos_abaixo += 1
+    if _turnos_abaixo < TURNOS_ABAIXO_PARA_BAIXAR:
+        return
+    _turnos_abaixo = 0
+    novo = max(180.0, pico_rms * 0.85)
+    if novo < VAD_LIMIAR:
+        print("  [VAD] %d turnos com som perto do limiar sem virar fala. "
+              "Baixando de %.0f para %.0f." % (TURNOS_ABAIXO_PARA_BAIXAR,
+                                               VAD_LIMIAR, novo))
+        VAD_LIMIAR = novo
+
+
 def _vigiar_silencio(pico_rms):
     """Avisa quando varios turnos seguidos vem em silencio digital.
 
@@ -1375,6 +1446,49 @@ def _vigiar_silencio(pico_rms):
     print("  Ponha MICROFONE=<numero ou parte do nome> no .env e reinicie.")
     print("  " + "!" * 58)
     print()
+
+
+def calibrar_vad(segundos=1.5):
+    """Ajusta o limiar de fala ao ruido REAL da sala, medindo no boot.
+
+    O limiar fixo de 180 foi calibrado noutra condicao. Medido na maquina do
+    usuario: o ruido ambiente tem mediana 205 e picos de 533 -- **67% dos
+    blocos de SILENCIO passavam por fala**. O Jarvis abria turno sozinho,
+    mandava quase-silencio ao Whisper, e o Whisper alucinava creditos de
+    legenda que viravam pergunta.
+
+    O fator e conservador de proposito: um limiar alto demais e MUITO pior que
+    um baixo demais -- deixa de ouvir o usuario, em vez de ouvir demais.
+    """
+    global VAD_LIMIAR
+    fila = queue.Queue()
+    try:
+        with sd.RawInputStream(samplerate=TAXA_MIC, channels=1, dtype="int16",
+                               blocksize=BLOCO, device=DISPOSITIVO_MIC,
+                               callback=lambda i, fr, t, s: fila.put(bytes(i))):
+            time.sleep(segundos)
+    except Exception as e:
+        print("  [VAD] nao consegui calibrar (%s); mantendo %.0f" % (e, VAD_LIMIAR))
+        return VAD_LIMIAR
+
+    picos = []
+    while not fila.empty():
+        b = fila.get()
+        picos.append(float(np.sqrt(np.mean(
+            np.frombuffer(b, dtype=np.int16).astype(np.float32) ** 2))))
+    if len(picos) < 5:
+        return VAD_LIMIAR
+
+    picos.sort()
+    p90 = picos[int(len(picos) * 0.9)]
+    novo = min(900.0, max(VAD_LIMIAR, p90 * 1.4))
+    if novo > VAD_LIMIAR * 1.05:
+        print("  VAD: ruido da sala p90=%.0f -> limiar %.0f (era %.0f)"
+              % (p90, novo, VAD_LIMIAR))
+        VAD_LIMIAR = novo
+    else:
+        print("  VAD: ruido da sala p90=%.0f; limiar %.0f mantido" % (p90, VAD_LIMIAR))
+    return VAD_LIMIAR
 
 
 def duracao_segundos(pcm, taxa=TAXA_MIC):
@@ -1473,6 +1587,7 @@ def escutar(ouvido, limite=25.0):
                     break
 
     _vigiar_silencio(pico_rms)
+    _vigiar_limiar_alto(pico_rms, falou)
 
     pcm = b"".join(blocos)
     texto = None
@@ -1812,7 +1927,16 @@ def main():
     t0 = time.perf_counter()
     anunciar_microfone()
     voz = Voz()
+    try:
+        # O Piper e o ultimo degrau da cadeia de voz -- justamente o que roda
+        # quando os outros ja falharam. Carregar o modelo dele custa 2,9s, e
+        # pagar isso DEPOIS de esperar Cartesia e Edge estourou o orcamento de
+        # fala relatado no uso real.
+        voz._obter_piper()
+    except Exception as e:
+        print("  [Voz] Piper nao pre-carregou: %s" % e)
     ouvido = Ouvido()
+    calibrar_vad()
     percepcao.contexto()          # aquece a arvore de acessibilidade
     print("  carga local: %.1fs" % (time.perf_counter() - t0))
     print("  preaquecendo %s (num_ctx=%d)..." % (MODELO_LLM, NUM_CTX))
