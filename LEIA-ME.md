@@ -101,6 +101,35 @@ favorita é o rosa"*, sobre alguém que nunca disse isso. Uma regra explícita n
 prompt levou de **2/15 para 12/15** de respostas honestas, sem perder nada na
 recordação (6/6).
 
+### Ele anota sozinho
+
+Depois de cada 3 trocas, uma reflexão roda **em segundo plano** sobre as
+últimas 12 e decide se algo mereceu virar memória. Nunca no meio de um turno:
+a voz já falou, ninguém está esperando.
+
+Ela roda em thread, e não no intervalo entre turnos, por um motivo específico:
+no intervalo o microfone está fechado. Refletir ali deixaria o Jarvis surdo
+por ~1s. Em thread, o pior caso é o próximo turno esperar um pouco pelo modelo.
+
+**Calibrado medindo**, antes de ligar:
+
+```
+recall    (conversas que deviam virar nota)   6/6
+precisão  (conversas que NÃO deviam)         10/10
+```
+
+A precisão é a metade que importa — uma memória cheia de "bom dia" é pior que
+uma vazia. Nas 10 conversas triviais testadas (cumprimento, cor, cotação,
+clima, horas, curiosidade), nenhuma virou nota.
+
+E a lista de categorias foi calibrada: a versão curta ("preferências, decisões,
+como ele trabalha") dava recall 3/6 — perdia horário de trabalho, hábitos e
+nomes de pessoas próximas. Nomear as categorias explicitamente levou a 6/6 sem
+custar precisão.
+
+Tudo que ele escreve vai para `vault/jarvis/`, carimbado com data e a origem.
+Você lê, corrige e apaga à vontade — é a sua pasta.
+
 ## Acompanhar a tela continuamente
 
 Diga **"ativar leitura de tela"**. Ele passa a reamostrar a tela a cada 1,5s e

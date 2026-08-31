@@ -32,6 +32,7 @@ import sounddevice as sd
 import memoria
 import percepcao
 import presenca
+import reflexao
 import vigia
 import hud_bridge
 import ferramentas
@@ -100,6 +101,10 @@ USAR_FERRAMENTAS = True
 # a origem das QUATRO armadilhas de prompt registradas no LEIA-ME. Agora o
 # modelo pede a tela quando precisa dela.
 TELA_COMO_FERRAMENTA = True
+
+# O Jarvis decide sozinho o que da conversa merece virar memoria, refletindo
+# em segundo plano. Calibrado medindo: recall 6/6 e precisao 10/10.
+MEMORIA_AUTONOMA = True
 
 # Piper TTS (100% offline)
 VOZ_TTS = BASE / "vozes" / "pt_BR-faber-medium.onnx"
@@ -502,6 +507,67 @@ class Etapas:
 
 
 # ----------------------------------------------------------------------- voz
+
+# --- reflexao: decidir sozinho o que virou memoria ---
+#
+# A transcricao e SEPARADA do historico de proposito. O historico sao 3 trocas
+# porque vai ao modelo a cada turno e e pago; a transcricao guarda 30 e nao
+# custa nada, porque so a reflexao a le. Sem ela, uma conversa longa perderia
+# o comeco antes de alguem avaliar se valia guardar.
+TRANSCRICAO = []
+MAX_TRANSCRICAO = 30 * 2
+_TROCAS_DESDE_REFLEXAO = 0
+_REFLETINDO = threading.Lock()
+
+
+def _modelo_para_reflexao(sistema, usuario):
+    corpo = {"model": MODELO_LLM,
+             "messages": [{"role": "system", "content": sistema},
+                          {"role": "user", "content": usuario}],
+             "stream": False, "think": False, "keep_alive": -1,
+             "options": {"temperature": 0.2, "num_ctx": NUM_CTX, "num_predict": 80}}
+    req = urllib.request.Request(OLLAMA + "/api/chat",
+                                 data=json.dumps(corpo).encode(), method="POST",
+                                 headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=120) as r:
+        return (json.loads(r.read()).get("message") or {}).get("content", "")
+
+
+def _refletir_em_segundo_plano():
+    """Roda numa thread, DEPOIS de a voz ja ter falado.
+
+    Em thread e nao no gap entre turnos porque, no gap, o microfone estaria
+    fechado: o usuario falaria e ninguem ouviria. Aqui o pior caso e o proximo
+    turno esperar ~1s pelo modelo, o que e bem melhor que ficar surdo.
+    """
+    if not _REFLETINDO.acquire(blocking=False):
+        return                      # ja ha uma reflexao em curso
+    try:
+        achado = reflexao.decidir(list(TRANSCRICAO), _modelo_para_reflexao)
+        if not achado:
+            return
+        assunto, fato = achado
+        caminho = memoria.anotar(assunto, fato, origem="reflexao automatica")
+        if caminho:
+            print("  [MEMORIA] anotei sozinho em %r: %s" % (assunto, fato[:70]))
+    except Exception as e:
+        print("  [Reflexao] %r" % (e,))
+    finally:
+        _REFLETINDO.release()
+
+
+def registrar_na_transcricao(pergunta, resposta):
+    """Guarda a troca e dispara a reflexao a cada A_CADA trocas."""
+    global _TROCAS_DESDE_REFLEXAO
+    TRANSCRICAO.append(("user", pergunta))
+    TRANSCRICAO.append(("assistant", resposta))
+    del TRANSCRICAO[:-MAX_TRANSCRICAO]
+
+    _TROCAS_DESDE_REFLEXAO += 1
+    if MEMORIA_AUTONOMA and _TROCAS_DESDE_REFLEXAO >= reflexao.A_CADA:
+        _TROCAS_DESDE_REFLEXAO = 0
+        threading.Thread(target=_refletir_em_segundo_plano, daemon=True).start()
+
 
 # A fala em curso, para a tecla de atalho saber o que interromper. E uma so
 # por vez: o ciclo e sequencial.
@@ -1524,6 +1590,7 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
                 voz.falar(resposta)
             if novo_hist and novo_hist[-1].get("role") == "assistant":
                 novo_hist[-1]["content"] = resposta
+            registrar_na_transcricao(texto, resposta)
             e.relatorio()
             hud_bridge.notificar(state="idle", benchmarks=e.resumo())
             return novo_hist
@@ -1532,6 +1599,7 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
         e.marca("5. ferramenta executada")
         hud_bridge.notificar(state="speaking", jarvisSpeech=resposta, **dados_hud)
         voz.falar(resposta, ao_primeiro=lambda: e.marca("6. Voz (1o audio) <- FALA"))
+        registrar_na_transcricao(texto, resposta)
         e.relatorio()
         hud_bridge.notificar(state="idle", benchmarks=e.resumo())
         return novo_hist
@@ -1601,6 +1669,7 @@ def ciclo(ouvido, voz, pcm, taxa, historico, rotulo="", texto_pronto=None):
         novo_hist[-1]["content"] = resposta
 
     FALA_EM_CURSO = None
+    registrar_na_transcricao(texto, resposta)
     e.relatorio()
     hud_bridge.notificar(
         state="idle",

@@ -268,6 +268,15 @@ def checar_memoria(r):
             % (est["notas"] + novas - removidas, novas, atualizadas, removidas,
                time.time() - t0))
 
+    import jarvis as _j, reflexao
+    r.anota(OK if _j.MEMORIA_AUTONOMA else AVISO, "reflexao autonoma",
+            ("ligada; reflete a cada %d trocas sobre uma janela de %d"
+             % (reflexao.A_CADA, reflexao.JANELA)) if _j.MEMORIA_AUTONOMA
+            else "desligada (MEMORIA_AUTONOMA no jarvis.py)")
+    escritas = list((memoria.caminho_vault() / memoria.PASTA_DO_JARVIS).glob("*.md"))
+    r.anota(OK, "notas escritas por ele", "%d em %s/"
+            % (len(escritas), memoria.PASTA_DO_JARVIS))
+
     n = est["sempre_chars"]
     r.anota(OK if n <= memoria.TETO_SEMPRE else AVISO, "_sempre.md",
             "%d caracteres (teto %d)" % (n, memoria.TETO_SEMPRE),
