@@ -243,6 +243,38 @@ def checar_atalho(r):
                 "defina uma que nao esteja em uso em ATALHO_INTERROMPER")
 
 
+def checar_memoria(r):
+    """A memoria de longo prazo esta no lugar e indexada?"""
+    import memoria
+    r.secao("Memoria (notas em Markdown + indice FTS5)")
+    try:
+        import sqlite3
+        sqlite3.connect(":memory:").execute("CREATE VIRTUAL TABLE t USING fts5(c)")
+        r.anota(OK, "FTS5", "disponivel no SQLite deste Python")
+    except Exception as e:
+        r.anota(FALHA, "FTS5", str(e)[:60],
+                "sem FTS5 a busca cai para substring, ~240x mais lenta")
+        return
+
+    est = memoria.estatisticas()
+    r.anota(OK if est["existe"] else FALHA, "vault", est["vault"],
+            "" if est["existe"] else "confira VAULT no .env")
+    if not est["existe"]:
+        return
+
+    t0 = time.time()
+    novas, atualizadas, removidas = memoria.indexar()
+    r.anota(OK, "indice", "%d notas (%d novas, %d atualizadas, %d removidas) em %.2fs"
+            % (est["notas"] + novas - removidas, novas, atualizadas, removidas,
+               time.time() - t0))
+
+    n = est["sempre_chars"]
+    r.anota(OK if n <= memoria.TETO_SEMPRE else AVISO, "_sempre.md",
+            "%d caracteres (teto %d)" % (n, memoria.TETO_SEMPRE),
+            "" if n <= memoria.TETO_SEMPRE else "isto vai no prompt de TODA "
+            "conversa; mova o excesso para uma nota propria")
+
+
 # ---------------------------------------------------------------------- cerebro
 
 def checar_ollama(r, jarvis):
@@ -446,6 +478,7 @@ def rodar(rapido=False):
     checar_microfone(r, jarvis)
     if not rapido:
         checar_eco(r, jarvis)
+    checar_memoria(r)
     checar_atalho(r)
     checar_ollama(r, jarvis)
     checar_ferramentas(r, jarvis)
